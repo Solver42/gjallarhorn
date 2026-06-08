@@ -1,3 +1,9 @@
+## 2
+
+### Fixed
+
+- Resolve correct type even without unique name
+
 ## 1
 
 ### Added

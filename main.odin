@@ -312,7 +312,13 @@ parse_enum_body :: proc(l: ^Lexer) -> Enum_Entry {
 g_index: Index
 
 respond_to_buffer :: proc(buffer: string) -> string {
-    // Find the word immediately before the cursor (the partial prefix being typed).
+    // Step 1 — strip any partially-typed word after the last dot (the prefix
+    // the user has already typed of the completion candidate).
+    //
+    //   "cat.breed.Per"  →  prefix = "Per",  chain_src = "cat.breed"
+    //   "cat.breed."     →  prefix = "",     chain_src = "cat.breed"
+    //   "cat.br"         →  prefix = "br",   chain_src = "cat"
+    //
     word_end   := len(buffer)
     word_start := word_end
     for word_start > 0 {
@@ -325,25 +331,83 @@ respond_to_buffer :: proc(buffer: string) -> string {
     }
     prefix := buffer[word_start:word_end]
 
-    // Only trigger when the character immediately before the word is a period.
+    // The character immediately before the word must be a dot.
     dot_pos := word_start - 1
     if dot_pos < 0 || buffer[dot_pos] != '.' {
         return ""
     }
 
-    // We are after `SomeName.` — look up the identifier before the dot.
-    ident_end   := dot_pos
-    ident_start := ident_end
-    for ident_start > 0 {
-        b := buffer[ident_start - 1]
-        if b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
-            ident_start -= 1
+    // Step 2 — collect the full dot-chain that ends at dot_pos.
+    // Walk left over [a-zA-Z0-9_.] to grab e.g. "cat.breed" or "SomeEnum".
+    chain_end   := dot_pos          // exclusive: the dot before prefix is not part of the chain
+    chain_start := chain_end
+    for chain_start > 0 {
+        b := buffer[chain_start - 1]
+        if b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '.' {
+            chain_start -= 1
         } else {
             break
         }
     }
-    type_name := buffer[ident_start:ident_end]
-    return completions_for_type(type_name, prefix, buffer)
+    chain := buffer[chain_start:chain_end]  // e.g. "cat.breed" or "Cat"
+    if chain == "" { return "" }
+
+    // Step 3 — resolve the chain to a concrete type name by walking each
+    // dot-separated segment through the index.
+    //
+    //   "cat.breed":
+    //     segment[0] = "cat"   → resolve_local_type → "Cat"
+    //     segment[1] = "breed" → look up field "breed" in struct Cat → "CatBreed"
+    //   result type = "CatBreed"  →  completions = [Persian, Siamese]
+    //
+    segments := strings.split(chain, ".")
+    defer delete(segments)
+
+    // Resolve the root segment to a type name.
+    current_type := resolve_to_type(segments[0], buffer)
+    if current_type == "" { return "" }
+
+    // Walk every subsequent segment as a field access on the current struct type.
+    for i := 1; i < len(segments); i += 1 {
+        field_name := segments[i]
+        if field_name == "" { return "" }
+
+        se, ok := g_index.structs[current_type]
+        if !ok { return "" }           // not a struct — cannot dot into it
+
+        next_type := ""
+        for f in se.fields {
+            if f.name == field_name {
+                next_type = f.type
+                break
+            }
+        }
+        if next_type == "" { return "" }  // field not found
+        current_type = next_type
+    }
+
+    return completions_for_type(current_type, prefix, buffer)
+}
+
+// resolve_to_type maps a single identifier to its declared type name.
+// Resolution order (mirrors the old completions_for_type lookup):
+//   1. The identifier itself is a known struct or enum name → return it as-is.
+//   2. It is a global variable with an explicit type declaration.
+//   3. It is a local variable somewhere above the cursor in the buffer.
+resolve_to_type :: proc(name: string, buffer: string) -> string {
+    // 1. Direct type name — already a struct or enum.
+    if name in g_index.structs || name in g_index.enums {
+        return name
+    }
+    // 2. Global variable.
+    if type_name, ok := g_index.variables[name]; ok {
+        return type_name
+    }
+    // 3. Local variable.
+    if type_name, ok := resolve_local_type(buffer, name); ok {
+        return type_name
+    }
+    return ""
 }
 
 // Scan the buffer text for a local declaration of `var_name` and return its
@@ -403,29 +467,13 @@ resolve_local_type :: proc(buffer: string, var_name: string) -> (string, bool) {
     return "", false
 }
 
-// After `name.` — return matching fields (struct) or values (enum).
-// Resolution order:
-//   1. Direct struct/enum name (MyStruct.)
-//   2. Global variable with explicit type  (my_var : MyStruct)
-//   3. Local variable in the buffer        (cat := Cat{})
-completions_for_type :: proc(name: string, prefix: string, buffer: string) -> string {
-    // 1. Direct type name.
-    resolved := name
-
-    if !(name in g_index.structs) && !(name in g_index.enums) {
-        // 2. Global variable declared at file scope.
-        if type_name, ok := g_index.variables[name]; ok {
-            resolved = type_name
-        } else if type_name, ok2 := resolve_local_type(buffer, name); ok2 {
-            // 3. Local variable declared somewhere above the cursor in the buffer.
-            resolved = type_name
-        }
-    }
-
+// Format completions for a fully-resolved type name and a typed prefix.
+// type_name must already be a concrete struct or enum name in g_index.
+// Returns lines formatted as "word\tTypeHint", one per candidate.
+completions_for_type :: proc(type_name: string, prefix: string, buffer: string) -> string {
     sb := strings.builder_make()
 
-    if entry, ok := g_index.structs[resolved]; ok {
-        // Format: "word\ttype" so the caller can show the type as a menu hint.
+    if entry, ok := g_index.structs[type_name]; ok {
         for f in entry.fields {
             if strings.has_prefix(f.name, prefix) {
                 strings.write_string(&sb, f.name)
@@ -434,13 +482,12 @@ completions_for_type :: proc(name: string, prefix: string, buffer: string) -> st
                 strings.write_byte(&sb, '\n')
             }
         }
-    } else if entry, ok := g_index.enums[resolved]; ok {
-        // Enum values carry the enum type name as the hint.
+    } else if entry, ok := g_index.enums[type_name]; ok {
         for v in entry.values {
             if strings.has_prefix(v, prefix) {
                 strings.write_string(&sb, v)
                 strings.write_byte(&sb, '\t')
-                strings.write_string(&sb, resolved)
+                strings.write_string(&sb, type_name)
                 strings.write_byte(&sb, '\n')
             }
         }
