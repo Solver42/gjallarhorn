@@ -1,0 +1,19 @@
+*gjallarhorn.txt*  Odin completion for Vim
+
+Author: solver42
+
+==============================================================================
+INTRODUCTION                            *gjallarhorn-intro*
+
+Gjallarhorn provides context-sensitive completions for struct fields and
+enum values in Odin source files.
+
+==============================================================================
+USAGE                                   *gjallarhorn-usage*
+
+Open an *.odin file. In insert mode, type a struct or enum name followed
+by a dot, then press Ctrl+X Ctrl+U to get completions. Use Ctrl+N / Ctrl+P
+to navigate candidates.
+
+==============================================================================
+ vim:tw=78:ts=8:ft=help:norl:

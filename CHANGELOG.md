@@ -1,3 +1,10 @@
+## 3
+
+### Added
+
+- POSIX-compliant
+- Help file
+
 ## 2
 
 ### Fixed
@@ -8,4 +15,4 @@
 
 ### Added
 
-- Autocomplete for enums and structs that are defined in the same file
+- Autocomplete for enums and structs that are defined in the current file

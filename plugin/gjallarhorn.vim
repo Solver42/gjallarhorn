@@ -4,21 +4,9 @@
 if exists('g:loaded_gjallarhorn') | finish | endif
 let g:loaded_gjallarhorn = 1
 
-" ---------------------------------------------------------------------------
-" Configuration
-" ---------------------------------------------------------------------------
-
 let g:gjallarhorn_bin = get(g:, 'gjallarhorn_bin', expand('~/.local/bin/gjallarhorn'))
 
-" ---------------------------------------------------------------------------
-" Internal state
-" ---------------------------------------------------------------------------
-
 let s:daemon_started = {}
-
-" ---------------------------------------------------------------------------
-" Daemon management
-" ---------------------------------------------------------------------------
 
 function! gjallarhorn#start_daemon(filepath) abort
     if !executable(g:gjallarhorn_bin)
@@ -34,10 +22,6 @@ function! gjallarhorn#start_daemon(filepath) abort
     let s:daemon_started[a:filepath] = 1
     echom 'gjallarhorn: daemon started for ' . a:filepath . ' (socket: ' . trim(l:output) . ')'
 endfunction
-
-" ---------------------------------------------------------------------------
-" Index — send the full file source to the daemon on save
-" ---------------------------------------------------------------------------
 
 function! gjallarhorn#index_file(filepath) abort
     if !executable(g:gjallarhorn_bin) | return | endif
@@ -59,7 +43,6 @@ endfunction
 
 function! gjallarhorn#completefunc(findstart, base) abort
     if a:findstart
-        " Find the start of the word before the cursor.
         let l:line  = getline('.')
         let l:start = col('.') - 1
         while l:start > 0 && l:line[l:start - 1] =~ '\w'
@@ -68,7 +51,6 @@ function! gjallarhorn#completefunc(findstart, base) abort
         return l:start
     endif
 
-    " Build buffer text up to the cursor and ask the daemon.
     let l:lines_above = join(getline(1, line('.') - 1), "\n")
     let l:prefix      = line('.') > 1 ? "\n" : ""
     let l:cursor_line = strpart(getline('.'), 0, col('.') - 1)
@@ -80,7 +62,6 @@ function! gjallarhorn#completefunc(findstart, base) abort
         \ shellescape(l:filepath) . ' ' .
         \ shellescape(l:buffer))
 
-    " Each line is "word\ttype". Build dicts so Vim shows the type as a menu hint.
     let l:candidates = []
     for l:line in split(trim(l:raw), "\n")
         if l:line == '' | continue | endif
@@ -91,10 +72,6 @@ function! gjallarhorn#completefunc(findstart, base) abort
     endfor
     return l:candidates
 endfunction
-
-" ---------------------------------------------------------------------------
-" Autocommands
-" ---------------------------------------------------------------------------
 
 augroup gjallarhorn
     autocmd!
@@ -107,9 +84,5 @@ augroup gjallarhorn
     autocmd BufWritePost *.odin
         \ call gjallarhorn#index_file(expand('<afile>:p'))
 augroup END
-
-" ---------------------------------------------------------------------------
-" Key mapping — Ctrl+X Ctrl+U triggers completefunc in insert mode
-" ---------------------------------------------------------------------------
 
 inoremap <silent> <C-x><C-u> <C-x><C-u>

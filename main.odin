@@ -5,12 +5,8 @@ import "core:encoding/hex"
 import "core:fmt"
 import "core:os"
 import "core:strings"
-import "core:sys/linux"
+import "core:sys/posix"
 import "core:unicode/utf8"
-
-// ---------------------------------------------------------------------------
-// Index — structs and enums parsed from the watched file
-// ---------------------------------------------------------------------------
 
 Field_Entry :: struct {
     name : string,
@@ -50,10 +46,6 @@ index_destroy :: proc(idx: ^Index) {
     delete(idx.variables)
 }
 
-// ---------------------------------------------------------------------------
-// Lexer — produces a flat stream of tokens from Odin source text
-// ---------------------------------------------------------------------------
-
 Token_Kind :: enum {
     EOF,
     Ident,
@@ -79,7 +71,6 @@ lexer_make :: proc(src: string) -> Lexer {
     return Lexer{src = src, pos = 0}
 }
 
-// Skip whitespace and line/block comments.
 lexer_skip_whitespace :: proc(l: ^Lexer) {
     for l.pos < len(l.src) {
         c := l.src[l.pos]
@@ -87,12 +78,10 @@ lexer_skip_whitespace :: proc(l: ^Lexer) {
             l.pos += 1
             continue
         }
-        // Line comment: //
         if c == '/' && l.pos + 1 < len(l.src) && l.src[l.pos + 1] == '/' {
             for l.pos < len(l.src) && l.src[l.pos] != '\n' { l.pos += 1 }
             continue
         }
-        // Block comment: /* ... */
         if c == '/' && l.pos + 1 < len(l.src) && l.src[l.pos + 1] == '*' {
             l.pos += 2
             for l.pos + 1 < len(l.src) {
@@ -114,7 +103,6 @@ lexer_next :: proc(l: ^Lexer) -> Token {
 
     c := l.src[l.pos]
 
-    // Identifier or keyword: [a-zA-Z_][a-zA-Z0-9_]*
     if c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
         start := l.pos
         for l.pos < len(l.src) {
@@ -142,7 +130,6 @@ lexer_next :: proc(l: ^Lexer) -> Token {
     if c == '}' { l.pos += 1; return Token{kind = .Close_Brace, text = "}"} }
     if c == ',' { l.pos += 1; return Token{kind = .Comma,       text = ","} }
 
-    // Skip any other byte (operators, literals, …)
     start := l.pos
     _, rune_width := utf8.decode_rune_in_string(l.src[l.pos:])
     l.pos += rune_width
@@ -156,11 +143,6 @@ lexer_peek :: proc(l: ^Lexer) -> Token {
     return tok
 }
 
-// ---------------------------------------------------------------------------
-// Parser — walks the token stream and builds an Index
-// ---------------------------------------------------------------------------
-
-// Parse the entire source file into a fresh Index.
 parse_source :: proc(src: string) -> Index {
     idx := Index{
         structs   = make(map[string]Struct_Entry),
@@ -178,7 +160,6 @@ parse_source :: proc(src: string) -> Index {
 
         next := lexer_peek(&l)
 
-        // <Name> :: struct { ... }  or  <Name> :: enum ... { ... }
         if next.kind == .Double_Colon {
             lexer_next(&l) // consume ::
             after := lexer_peek(&l)
@@ -194,7 +175,6 @@ parse_source :: proc(src: string) -> Index {
             continue
         }
 
-        // <name> : TypeName   (global variable declaration, single colon)
         if next.kind == .Colon {
             lexer_next(&l) // consume :
             type_tok := lexer_peek(&l)
@@ -209,13 +189,9 @@ parse_source :: proc(src: string) -> Index {
     return idx
 }
 
-// Parse everything between the { } of a struct body.
-// Odin struct fields look like:   field_name : Type,
-// We collect field names and their type text.
 parse_struct_body :: proc(l: ^Lexer) -> Struct_Entry {
     entry := Struct_Entry{fields = make([dynamic]Field_Entry)}
 
-    // Skip any tokens before the opening brace (e.g. `#packed`, `using`, …)
     depth := 0
     for {
         tok := lexer_next(l)
@@ -233,18 +209,14 @@ parse_struct_body :: proc(l: ^Lexer) -> Struct_Entry {
         case .Close_Brace:
             depth -= 1
         case .Ident:
-            // Only at top depth — nested braces are sub-structs / using blocks.
             if depth != 1 { continue }
             field_name := tok.text
-            // Expect a colon next (field : Type).  Skip if pattern doesn't match.
             if lexer_peek(l).kind != .Colon { continue }
             lexer_next(l) // consume :
-            // Collect type tokens until comma, close-brace, or another field pattern.
             type_parts := make([dynamic]string, context.temp_allocator)
             for {
                 pk := lexer_peek(l)
                 if pk.kind == .EOF || pk.kind == .Comma || pk.kind == .Close_Brace { break }
-                // Stop if we see another "ident :" — that's the next field.
                 if pk.kind == .Ident {
                     saved := l.pos
                     lexer_next(l)
@@ -264,18 +236,14 @@ parse_struct_body :: proc(l: ^Lexer) -> Struct_Entry {
                 type = type_str,
             })
         case:
-            // ignore
         }
     }
     return entry
 }
 
-// Parse everything between the { } of an enum body.
-// Odin enum values are simply identifiers separated by commas.
 parse_enum_body :: proc(l: ^Lexer) -> Enum_Entry {
     entry := Enum_Entry{values = make([dynamic]string)}
 
-    // Skip optional base type and directives before the opening brace.
     for {
         tok := lexer_next(l)
         if tok.kind == .EOF { return entry }
@@ -289,7 +257,6 @@ parse_enum_body :: proc(l: ^Lexer) -> Enum_Entry {
             return entry
         case .Ident:
             append(&entry.values, strings.clone(tok.text))
-            // Skip optional  = <expr>  assignment before the comma.
             for {
                 pk := lexer_peek(l)
                 if pk.kind == .EOF || pk.kind == .Comma || pk.kind == .Close_Brace { break }
@@ -297,28 +264,13 @@ parse_enum_body :: proc(l: ^Lexer) -> Enum_Entry {
             }
             if lexer_peek(l).kind == .Comma { lexer_next(l) }
         case:
-            // ignore
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Completion logic
-// ---------------------------------------------------------------------------
-
-// The daemon's mutable state — one index per watched file path.
-// Since the daemon is single-threaded (sequential accept loop) we don't need
-// any locking.
 g_index: Index
 
 respond_to_buffer :: proc(buffer: string) -> string {
-    // Step 1 — strip any partially-typed word after the last dot (the prefix
-    // the user has already typed of the completion candidate).
-    //
-    //   "cat.breed.Per"  →  prefix = "Per",  chain_src = "cat.breed"
-    //   "cat.breed."     →  prefix = "",     chain_src = "cat.breed"
-    //   "cat.br"         →  prefix = "br",   chain_src = "cat"
-    //
     word_end   := len(buffer)
     word_start := word_end
     for word_start > 0 {
@@ -331,15 +283,12 @@ respond_to_buffer :: proc(buffer: string) -> string {
     }
     prefix := buffer[word_start:word_end]
 
-    // The character immediately before the word must be a dot.
     dot_pos := word_start - 1
     if dot_pos < 0 || buffer[dot_pos] != '.' {
         return ""
     }
 
-    // Step 2 — collect the full dot-chain that ends at dot_pos.
-    // Walk left over [a-zA-Z0-9_.] to grab e.g. "cat.breed" or "SomeEnum".
-    chain_end   := dot_pos          // exclusive: the dot before prefix is not part of the chain
+    chain_end   := dot_pos
     chain_start := chain_end
     for chain_start > 0 {
         b := buffer[chain_start - 1]
@@ -349,31 +298,21 @@ respond_to_buffer :: proc(buffer: string) -> string {
             break
         }
     }
-    chain := buffer[chain_start:chain_end]  // e.g. "cat.breed" or "Cat"
+    chain := buffer[chain_start:chain_end]
     if chain == "" { return "" }
 
-    // Step 3 — resolve the chain to a concrete type name by walking each
-    // dot-separated segment through the index.
-    //
-    //   "cat.breed":
-    //     segment[0] = "cat"   → resolve_local_type → "Cat"
-    //     segment[1] = "breed" → look up field "breed" in struct Cat → "CatBreed"
-    //   result type = "CatBreed"  →  completions = [Persian, Siamese]
-    //
     segments := strings.split(chain, ".")
     defer delete(segments)
 
-    // Resolve the root segment to a type name.
     current_type := resolve_to_type(segments[0], buffer)
     if current_type == "" { return "" }
 
-    // Walk every subsequent segment as a field access on the current struct type.
     for i := 1; i < len(segments); i += 1 {
         field_name := segments[i]
         if field_name == "" { return "" }
 
         se, ok := g_index.structs[current_type]
-        if !ok { return "" }           // not a struct — cannot dot into it
+        if !ok { return "" }
 
         next_type := ""
         for f in se.fields {
@@ -382,59 +321,39 @@ respond_to_buffer :: proc(buffer: string) -> string {
                 break
             }
         }
-        if next_type == "" { return "" }  // field not found
+        if next_type == "" { return "" }
         current_type = next_type
     }
 
     return completions_for_type(current_type, prefix, buffer)
 }
 
-// resolve_to_type maps a single identifier to its declared type name.
-// Resolution order (mirrors the old completions_for_type lookup):
-//   1. The identifier itself is a known struct or enum name → return it as-is.
-//   2. It is a global variable with an explicit type declaration.
-//   3. It is a local variable somewhere above the cursor in the buffer.
 resolve_to_type :: proc(name: string, buffer: string) -> string {
-    // 1. Direct type name — already a struct or enum.
     if name in g_index.structs || name in g_index.enums {
         return name
     }
-    // 2. Global variable.
     if type_name, ok := g_index.variables[name]; ok {
         return type_name
     }
-    // 3. Local variable.
     if type_name, ok := resolve_local_type(buffer, name); ok {
         return type_name
     }
     return ""
 }
 
-// Scan the buffer text for a local declaration of `var_name` and return its
-// type name.  Handles two patterns:
-//
-//   name : TypeName          (explicit type)
-//   name := TypeName{...}    (inferred type from composite literal)
-//
-// We search backwards so the nearest declaration wins.
 resolve_local_type :: proc(buffer: string, var_name: string) -> (string, bool) {
     i := len(buffer)
     for i > 0 {
-        // Find the previous newline to get a line to examine.
         line_end := i
         i -= 1
         for i > 0 && buffer[i - 1] != '\n' { i -= 1 }
         line := strings.trim_space(buffer[i:line_end])
 
-        // Match "var_name : TypeName" or "var_name := TypeName{"
-        // We check that the line starts with var_name followed by whitespace or colon.
         if !strings.has_prefix(line, var_name) { continue }
         rest := strings.trim_left(line[len(var_name):], " \t")
 
-        // Pattern 1: "name : TypeName"
-        if strings.has_prefix(rest, ": ") || strings.has_prefix(rest, ":\t") || rest == ":" {
+        if len(rest) > 0 && rest[0] == ':' && (len(rest) == 1 || rest[1] != '=') {
             after_colon := strings.trim_left(rest[1:], " \t")
-            // Extract the first identifier token as the type name.
             end := 0
             for end < len(after_colon) {
                 b := after_colon[end]
@@ -445,8 +364,7 @@ resolve_local_type :: proc(buffer: string, var_name: string) -> (string, bool) {
             if end > 0 { return after_colon[:end], true }
         }
 
-        // Pattern 2: "name := TypeName{"
-        if strings.has_prefix(rest, ":= ") || strings.has_prefix(rest, ":=\t") || strings.has_prefix(rest, ":=") {
+        if strings.has_prefix(rest, ":=") {
             after_assign := strings.trim_left(rest[2:], " \t")
             end := 0
             for end < len(after_assign) {
@@ -455,7 +373,6 @@ resolve_local_type :: proc(buffer: string, var_name: string) -> (string, bool) {
                     end += 1
                 } else { break }
             }
-            // Only accept if followed by '{' (composite literal), confirming it is a type.
             if end > 0 {
                 after_ident := strings.trim_left(after_assign[end:], " \t")
                 if len(after_ident) > 0 && after_ident[0] == '{' {
@@ -467,9 +384,6 @@ resolve_local_type :: proc(buffer: string, var_name: string) -> (string, bool) {
     return "", false
 }
 
-// Format completions for a fully-resolved type name and a typed prefix.
-// type_name must already be a concrete struct or enum name in g_index.
-// Returns lines formatted as "word\tTypeHint", one per candidate.
 completions_for_type :: proc(type_name: string, prefix: string, buffer: string) -> string {
     sb := strings.builder_make()
 
@@ -497,34 +411,28 @@ completions_for_type :: proc(type_name: string, prefix: string, buffer: string) 
     return strings.trim_right(result, "\n")
 }
 
-// ---------------------------------------------------------------------------
-// Shared I/O helpers
-// ---------------------------------------------------------------------------
+MAX_MESSAGE_BYTES :: 4 * 1024 * 1024
 
-MAX_MESSAGE_BYTES :: 4 * 1024 * 1024  // 4 MiB (source files can be large)
-
-fd_read_exactly :: proc(fd: linux.Fd, buf: []u8) -> bool {
+fd_read_exactly :: proc(fd: posix.FD, buf: []u8) -> bool {
     total := 0
     for total < len(buf) {
-        n, err := linux.read(fd, buf[total:])
-        if err != .NONE || n == 0 { return false }
+        n := posix.read(fd, &buf[total], uint(len(buf[total:])))
+        if n <= 0 { return false }
         total += n
     }
     return true
 }
 
-fd_write_all :: proc(fd: linux.Fd, buf: []u8) {
+fd_write_all :: proc(fd: posix.FD, buf: []u8) {
     total := 0
     for total < len(buf) {
-        n, _ := linux.write(fd, buf[total:])
+        n := posix.write(fd, &buf[total], uint(len(buf[total:])))
         if n <= 0 { return }
         total += n
     }
 }
 
-// Message framing: 4-byte big-endian uint32 length prefix + UTF-8 body.
-
-frame_write :: proc(fd: linux.Fd, msg: string) {
+frame_write :: proc(fd: posix.FD, msg: string) {
     body    := transmute([]u8)msg
     msg_len := u32(len(body))
     header: [4]u8 = {u8(msg_len >> 24), u8(msg_len >> 16), u8(msg_len >> 8), u8(msg_len)}
@@ -532,7 +440,7 @@ frame_write :: proc(fd: linux.Fd, msg: string) {
     fd_write_all(fd, body)
 }
 
-frame_read :: proc(fd: linux.Fd, allocator := context.allocator) -> (string, bool) {
+frame_read :: proc(fd: posix.FD, allocator := context.allocator) -> (string, bool) {
     header: [4]u8
     if !fd_read_exactly(fd, header[:]) { return "", false }
     msg_len := u32(header[0]) << 24 | u32(header[1]) << 16 | u32(header[2]) << 8 | u32(header[3])
@@ -546,10 +454,6 @@ frame_read :: proc(fd: linux.Fd, allocator := context.allocator) -> (string, boo
     }
     return string(body), true
 }
-
-// ---------------------------------------------------------------------------
-// Socket path
-// ---------------------------------------------------------------------------
 
 SOCKET_DIR    :: "/tmp"
 SOCKET_PREFIX :: "gjallarhorn_"
@@ -567,9 +471,15 @@ socket_path_for_file :: proc(filepath: string, allocator := context.allocator) -
     return strings.join({SOCKET_DIR, "/", SOCKET_PREFIX, string(hash_hex), ".sock"}, "", allocator)
 }
 
-// ---------------------------------------------------------------------------
-// Daemon — --start <absolute_filepath>
-// ---------------------------------------------------------------------------
+make_sockaddr_un :: proc(sock_path: string) -> posix.sockaddr_un {
+    addr: posix.sockaddr_un
+    addr.sun_family = .UNIX
+    when ODIN_OS == .Darwin {
+        addr.sun_len = u8(size_of(addr))
+    }
+    copy(addr.sun_path[:], sock_path)
+    return addr
+}
 
 daemon_start :: proc(filepath: string) {
     sock_path := socket_path_for_file(filepath)
@@ -577,30 +487,28 @@ daemon_start :: proc(filepath: string) {
 
     sock_path_c := strings.clone_to_cstring(sock_path)
     defer delete(sock_path_c)
-    linux.unlink(sock_path_c)
+    posix.unlink(sock_path_c)
 
-    server_fd, sock_err := linux.socket(.UNIX, .STREAM, {}, .HOPOPT)
-    if sock_err != .NONE {
-        fmt.eprintfln("gjallarhorn: socket() failed: %v", sock_err)
+    server_fd := posix.socket(.UNIX, .STREAM)
+    if int(server_fd) < 0 {
+        fmt.eprintfln("gjallarhorn: socket() failed: %v", posix.errno())
         os.exit(1)
     }
 
-    addr: linux.Sock_Addr_Un
-    addr.sun_family = .UNIX
-    copy(addr.sun_path[:], sock_path)
+    addr := make_sockaddr_un(sock_path)
 
-    if err := linux.bind(server_fd, &addr); err != .NONE {
-        fmt.eprintfln("gjallarhorn: bind() failed: %v", err)
+    if posix.bind(server_fd, cast(^posix.sockaddr)&addr, posix.socklen_t(size_of(addr))) == .FAIL {
+        fmt.eprintfln("gjallarhorn: bind() failed: %v", posix.errno())
         os.exit(1)
     }
-    if err := linux.listen(server_fd, 8); err != .NONE {
-        fmt.eprintfln("gjallarhorn: listen() failed: %v", err)
+    if posix.listen(server_fd, 8) == .FAIL {
+        fmt.eprintfln("gjallarhorn: listen() failed: %v", posix.errno())
         os.exit(1)
     }
 
-    pid, fork_err := linux.fork()
-    if fork_err != .NONE {
-        fmt.eprintfln("gjallarhorn: fork() failed: %v", fork_err)
+    pid := posix.fork()
+    if int(pid) < 0 {
+        fmt.eprintfln("gjallarhorn: fork() failed: %v", posix.errno())
         os.exit(1)
     }
     if pid != 0 {
@@ -608,9 +516,8 @@ daemon_start :: proc(filepath: string) {
         os.exit(0)
     }
 
-    linux.setsid()
+    posix.setsid()
 
-    // Index the file immediately on startup.
     if src, err := os.read_entire_file_from_path(filepath, context.allocator); err == nil {
         new_index := parse_source(string(src))
         index_destroy(&g_index)
@@ -621,44 +528,33 @@ daemon_start :: proc(filepath: string) {
     daemon_serve(server_fd)
 }
 
-daemon_serve :: proc(server_fd: linux.Fd) {
+daemon_serve :: proc(server_fd: posix.FD) {
     for {
-        client_fd, accept_err := linux.accept(server_fd, (^linux.Sock_Addr_Un)(nil))
-        if accept_err != .NONE { continue }
+        client_fd := posix.accept(server_fd, nil, nil)
+        if int(client_fd) < 0 { continue }
         handle_client(client_fd)
-        linux.close(client_fd)
+        posix.close(client_fd)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Protocol
-//
-// Every message is framed with a 4-byte length prefix.
-// The first framed message from the client is a one-line command header:
-//
-//   "comp"   → second message is the buffer; reply with completions
-//   "index"  → second message is full file source; rebuild index, reply ""
-// ---------------------------------------------------------------------------
-
-handle_client :: proc(client_fd: linux.Fd) {
+handle_client :: proc(client_fd: posix.FD) {
     cmd, ok := frame_read(client_fd)
     if !ok { return }
     defer delete(cmd)
 
     switch cmd {
     case "comp":
-        buffer, ok2 := frame_read(client_fd)
-        if !ok2 { return }
+        buffer, buf_ok := frame_read(client_fd)
+        if !buf_ok { return }
         defer delete(buffer)
         response := respond_to_buffer(buffer)
         defer delete(response)
         frame_write(client_fd, response)
 
     case "index":
-        filepath, ok2 := frame_read(client_fd)
-        if !ok2 { return }
+        filepath, path_ok := frame_read(client_fd)
+        if !path_ok { return }
         defer delete(filepath)
-        // Read the file from disk — avoids shell escaping limits on large files.
         if src, err := os.read_entire_file_from_path(filepath, context.allocator); err == nil {
             new_index := parse_source(string(src))
             index_destroy(&g_index)
@@ -672,43 +568,36 @@ handle_client :: proc(client_fd: linux.Fd) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Client helpers
-// ---------------------------------------------------------------------------
-
-client_connect :: proc(filepath: string) -> (linux.Fd, bool) {
+client_connect :: proc(filepath: string) -> (posix.FD, bool) {
     sock_path := socket_path_for_file(filepath)
     defer delete(sock_path)
 
-    fd, sock_err := linux.socket(.UNIX, .STREAM, {}, .HOPOPT)
-    if sock_err != .NONE {
-        fmt.eprintfln("gjallarhorn: socket() failed: %v", sock_err)
+    fd := posix.socket(.UNIX, .STREAM)
+    if int(fd) < 0 {
+        fmt.eprintfln("gjallarhorn: socket() failed: %v", posix.errno())
         return 0, false
     }
 
-    addr: linux.Sock_Addr_Un
-    addr.sun_family = .UNIX
-    copy(addr.sun_path[:], sock_path)
+    addr := make_sockaddr_un(sock_path)
 
-    if err := linux.connect(fd, &addr); err != .NONE {
+    if posix.connect(fd, cast(^posix.sockaddr)&addr, posix.socklen_t(size_of(addr))) == .FAIL {
         fmt.eprintfln("gjallarhorn: could not connect to daemon at %s", sock_path)
-        linux.close(fd)
+        posix.close(fd)
         return 0, false
     }
     return fd, true
 }
 
-// --comp <filepath> <buffer>
 client_comp :: proc(filepath: string, buffer: string) {
     fd, ok := client_connect(filepath)
     if !ok { os.exit(1) }
-    defer linux.close(fd)
+    defer posix.close(fd)
 
     frame_write(fd, "comp")
     frame_write(fd, buffer)
 
-    response, ok2 := frame_read(fd)
-    if !ok2 {
+    response, resp_ok := frame_read(fd)
+    if !resp_ok {
         fmt.eprintfln("gjallarhorn: no response from daemon")
         os.exit(1)
     }
@@ -719,24 +608,17 @@ client_comp :: proc(filepath: string, buffer: string) {
     }
 }
 
-// --index <filepath>
-// Tells the daemon to re-read and re-index the file from disk.
 client_index :: proc(filepath: string) {
     fd, ok := client_connect(filepath)
     if !ok { os.exit(1) }
-    defer linux.close(fd)
+    defer posix.close(fd)
 
     frame_write(fd, "index")
     frame_write(fd, filepath)
 
-    // Wait for the acknowledgement so the save doesn't race a following comp.
     response, _ := frame_read(fd)
     delete(response)
 }
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
 
 main :: proc() {
     if len(os.args) < 3 {
@@ -746,16 +628,13 @@ main :: proc() {
 
     switch os.args[1] {
     case "--start":
-        // --start <absolute_filepath>
         daemon_start(os.args[2])
 
     case "--comp":
-        // --comp <absolute_filepath> <buffer_until_cursor>
         if len(os.args) < 4 { usage(); os.exit(1) }
         client_comp(os.args[2], os.args[3])
 
     case "--index":
-        // --index <absolute_filepath>
         client_index(os.args[2])
 
     case:
