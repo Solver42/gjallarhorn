@@ -1,3 +1,9 @@
+## 5
+
+### Added
+
+- Cross-file autocomplete in the current directory
+
 ## 4
 
 ### Added

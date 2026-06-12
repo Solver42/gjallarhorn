@@ -14,20 +14,23 @@ function! gjallarhorn#start_daemon(filepath) abort
         return
     endif
 
-    if has_key(s:daemon_started, a:filepath)
+    let l:dir = fnamemodify(a:filepath, ':h')
+
+    if has_key(s:daemon_started, l:dir)
         return
     endif
 
     let l:output = system(g:gjallarhorn_bin . ' --start ' . shellescape(a:filepath))
-    let s:daemon_started[a:filepath] = 1
-    echom 'gjallarhorn: daemon started for ' . a:filepath . ' (socket: ' . trim(l:output) . ')'
+    let s:daemon_started[l:dir] = 1
+    echom 'gjallarhorn: daemon started for ' . l:dir . ' (socket: ' . trim(l:output) . ')'
 endfunction
 
 function! gjallarhorn#index_file(filepath) abort
     if !executable(g:gjallarhorn_bin) | return | endif
-    if !has_key(s:daemon_started, a:filepath) | return | endif
+    let l:dir = fnamemodify(a:filepath, ':h')
+    if !has_key(s:daemon_started, l:dir) | return | endif
 
-    " Daemon reads the file from disk — no need to pipe source through the shell.
+    " Daemon re-scans the entire directory from disk.
     call system(g:gjallarhorn_bin . ' --index ' . shellescape(a:filepath))
 endfunction
 

@@ -580,7 +580,95 @@ index_imports :: proc(idx: ^Index, source_file: string) {
     }
 }
 
+index_directory :: proc(dir_path: string, source_file: string) -> Index {
+    idx := Index{
+        structs        = make(map[string]Struct_Entry),
+        enums          = make(map[string]Enum_Entry),
+        variables      = make(map[string]string),
+        imports        = make(map[string]string),
+        imports_data   = make(map[string]^Import_Result),
+        all_structs    = make(map[string]Struct_Entry),
+        all_enums      = make(map[string]Enum_Entry),
+    }
+
+    file_infos, err := os.read_all_directory_by_path(dir_path, context.temp_allocator)
+    if err != nil { return idx }
+
+    for fi in file_infos {
+        if fi.type == .Directory { continue }
+        name := fi.name
+        if !strings.has_suffix(name, ".odin") { continue }
+        if strings.has_suffix(name, "_test.odin") { continue }
+
+        full_path := strings.concatenate({dir_path, "/", name}, context.temp_allocator)
+        src_data, read_err := os.read_entire_file_from_path(full_path, context.allocator)
+        if read_err != nil { continue }
+        src := string(src_data)
+        temp_idx := parse_source(src)
+
+        for k, &s in temp_idx.structs {
+            if old, ok := idx.structs[k]; ok {
+                for &f in old.fields { delete(f.name); delete(f.type) }
+                delete(old.fields)
+                delete_key(&idx.structs, k)
+            }
+            idx.structs[k] = s
+            delete_key(&temp_idx.structs, k)
+        }
+        for _, &s in temp_idx.structs {
+            for &f in s.fields { delete(f.name); delete(f.type) }
+            delete(s.fields)
+        }
+        delete(temp_idx.structs)
+        temp_idx.structs = {}
+
+        for k, &e in temp_idx.enums {
+            if old, ok := idx.enums[k]; ok {
+                for v in old.values { delete(v) }
+                delete(old.values)
+                delete_key(&idx.enums, k)
+            }
+            idx.enums[k] = e
+            delete_key(&temp_idx.enums, k)
+        }
+        for _, &e in temp_idx.enums {
+            for v in e.values { delete(v) }
+            delete(e.values)
+        }
+        delete(temp_idx.enums)
+        temp_idx.enums = {}
+
+        for k, v in temp_idx.variables {
+            if old, ok := idx.variables[k]; ok { delete(old); delete_key(&idx.variables, k) }
+            idx.variables[k] = v
+            delete_key(&temp_idx.variables, k)
+        }
+
+        for k, v in temp_idx.imports {
+            if old, ok := idx.imports[k]; ok { delete(old); delete_key(&idx.imports, k) }
+            idx.imports[k] = v
+            delete_key(&temp_idx.imports, k)
+        }
+
+        index_destroy(&temp_idx)
+        delete(src_data, context.allocator)
+    }
+
+    index_imports(&idx, source_file)
+    return idx
+}
+
 g_index: Index
+
+extract_parent_dir :: proc(filepath: string, allocator := context.allocator) -> string {
+    for i := len(filepath) - 1; i >= 0; i -= 1 {
+        if filepath[i] == '/' {
+            if i == 0 { return strings.clone("/", allocator) }
+            return strings.clone(filepath[:i], allocator)
+        }
+    }
+    return strings.clone(".", allocator)
+}
 
 split_qualified_name :: proc(name: string) -> (string, string, bool) {
     for i := 0; i < len(name); i += 1 {
@@ -965,10 +1053,10 @@ frame_read :: proc(fd: posix.FD, allocator := context.allocator) -> (string, boo
 SOCKET_DIR    :: "/tmp"
 SOCKET_PREFIX :: "gjallarhorn_"
 
-socket_path_for_file :: proc(filepath: string, allocator := context.allocator) -> string {
+socket_path_for_dir :: proc(dirpath: string, allocator := context.allocator) -> string {
     ctx: md5.Context
     md5.init(&ctx)
-    md5.update(&ctx, transmute([]u8)filepath)
+    md5.update(&ctx, transmute([]u8)dirpath)
     digest: [md5.DIGEST_SIZE]u8
     md5.final(&ctx, digest[:])
 
@@ -989,7 +1077,10 @@ make_sockaddr_un :: proc(sock_path: string) -> posix.sockaddr_un {
 }
 
 daemon_start :: proc(filepath: string) {
-    sock_path := socket_path_for_file(filepath)
+    dir := extract_parent_dir(filepath)
+    defer delete(dir)
+
+    sock_path := socket_path_for_dir(dir)
     defer delete(sock_path)
 
     sock_path_c := strings.clone_to_cstring(sock_path)
@@ -1026,15 +1117,7 @@ daemon_start :: proc(filepath: string) {
     posix.setsid()
 
     import_cache = make(map[string]Import_Result)
-
-    if src, err := os.read_entire_file_from_path(filepath, context.allocator); err == nil {
-        new_index := parse_source(string(src))
-        index_destroy(&g_index)
-        g_index = new_index
-        index_imports(&g_index, filepath)
-        delete(src, context.allocator)
-    }
-
+    g_index = index_directory(dir, filepath)
     daemon_serve(server_fd)
 }
 
@@ -1065,13 +1148,10 @@ handle_client :: proc(client_fd: posix.FD) {
         filepath, path_ok := frame_read(client_fd)
         if !path_ok { return }
         defer delete(filepath)
-        if src, err := os.read_entire_file_from_path(filepath, context.allocator); err == nil {
-            new_index := parse_source(string(src))
-            index_destroy(&g_index)
-            g_index = new_index
-            index_imports(&g_index, filepath)
-            delete(src, context.allocator)
-        }
+        dir := extract_parent_dir(filepath)
+        defer delete(dir)
+        index_destroy(&g_index)
+        g_index = index_directory(dir, filepath)
         frame_write(client_fd, "") // acknowledge
 
     case:
@@ -1080,7 +1160,9 @@ handle_client :: proc(client_fd: posix.FD) {
 }
 
 client_connect :: proc(filepath: string) -> (posix.FD, bool) {
-    sock_path := socket_path_for_file(filepath)
+    dir := extract_parent_dir(filepath)
+    defer delete(dir)
+    sock_path := socket_path_for_dir(dir)
     defer delete(sock_path)
 
     fd := posix.socket(.UNIX, .STREAM)
