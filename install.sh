@@ -3,6 +3,12 @@
 
 set -e
 
+if ! command -v odin >/dev/null 2>&1; then
+    echo "ERROR: 'odin' compiler not found on PATH."
+    echo "       Install Odin from https://odin-lang.org or add it to your PATH."
+    exit 1
+fi
+
 cd "$(dirname "$0")"
 
 BINARY="gjallarhorn"
@@ -17,8 +23,7 @@ if [ ! -f "$BINARY" ]; then
 fi
 
 mkdir -p "$INSTALL_DIR"
-mv "$BINARY" "$INSTALL_DIR/$BINARY"
-chmod 755 "$INSTALL_DIR/$BINARY"
+install -m 755 "$BINARY" "$INSTALL_DIR/$BINARY"
 
 echo "==> Installed: $INSTALL_DIR/$BINARY"
 

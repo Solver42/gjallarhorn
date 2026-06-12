@@ -1,3 +1,11 @@
+## 4
+
+### Added
+
+- Autocomplete for imported libraries
+- Autocomplete for type aliases
+- MIT license
+
 ## 3
 
 ### Added

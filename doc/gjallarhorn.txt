@@ -5,15 +5,44 @@ Author: solver42
 ==============================================================================
 INTRODUCTION                            *gjallarhorn-intro*
 
-Gjallarhorn provides context-sensitive completions for struct fields and
-enum values in Odin source files.
+Gjallarhorn provides context-sensitive completions for Odin source files. It
+runs as a persistent background daemon (Unix socket server) that keeps an index
+of struct fields, enum values, type aliases, and imported library symbols.
 
 ==============================================================================
 USAGE                                   *gjallarhorn-usage*
 
-Open an *.odin file. In insert mode, type a struct or enum name followed
-by a dot, then press Ctrl+X Ctrl+U to get completions. Use Ctrl+N / Ctrl+P
-to navigate candidates.
+Open an *.odin file. In insert mode, type a name followed by a dot, then press
+Ctrl+X Ctrl+U to get completions. Use Ctrl+N / Ctrl+P to navigate candidates.
+
+Completions work for:
+  - Struct fields and enum values defined in the current file
+  - Imported library symbols (qualified access, e.g. "fmt.p" completes to
+    "print", "printf", "println")
+  - Type aliases ("MyInt :: int")
+  - Chained member access (e.g. "a.b.c." resolves through each field's type)
+  - Unqualified names (struct name, enum name, variable name, followed by dot)
+
+The daemon automatically re-indexes your file when you save it (via the
+BufWritePost autocommand). No manual action is needed.
+
+==============================================================================
+CONFIGURATION                           *gjallarhorn-config*
+
+The binary path can be customized by setting |g:gjallarhorn_bin| in your
+vimrc before the plugin loads:
+
+  let g:gjallarhorn_bin = '~/.local/bin/gjallarhorn'
+
+By default the plugin looks for the binary at ~/.local/bin/gjallarhorn.
+
+==============================================================================
+DAEMON                                  *gjallarhorn-daemon*
+
+Gjallarhorn forks into a background process that listens on a Unix socket
+(/tmp/gjallarhorn_<md5-hash>.sock). The daemon persists between Vim sessions
+and serves completion requests for the indexed file. When the file is saved,
+the daemon re-reads it and updates its index.
 
 ==============================================================================
  vim:tw=78:ts=8:ft=help:norl:
