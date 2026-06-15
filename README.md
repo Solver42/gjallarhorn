@@ -1,6 +1,6 @@
 # gjallarhorn
 
-Odin completion for [Vim](https://github.com/vim/vim).
+Odin tool for [Vim](https://github.com/vim/vim).
 
 ## Requirements
 
@@ -23,6 +23,8 @@ Use `Ctrl+N` / `Ctrl+P` to cycle.
 Completions for struct fields, enum values, type aliases, imported library
 symbols, and chained member access (`a.b.c.`). Re-indexes on save.
 
+Press `K` on any symbol to see its definition in a popup window.
+
 ## Configuration
 
 Set `g:gjallarhorn_bin` in your `.vimrc` to customize the binary path:
@@ -32,6 +34,12 @@ let g:gjallarhorn_bin = expand('~/.local/bin/gjallarhorn')
 ```
 
 Defaults to `~/.local/bin/gjallarhorn`.
+
+## Debugging
+
+```sh
+export GJALLARHORN_DEBUG=1
+```
 
 ## License
 

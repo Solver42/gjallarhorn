@@ -2,7 +2,7 @@
 
 Author: solver42
 
-==============================================================================
+=============================================================================
 USAGE                                   *gjallarhorn-usage*
 
 Open an *.odin file. In insert mode, type a name followed by a dot, then press
@@ -16,7 +16,25 @@ Completions for:
 
 The daemon re-indexes on save. No manual action needed.
 
-==============================================================================
+Press K on a symbol to see its definition in a popup window.
+
+=============================================================================
+HOVER                                   *gjallarhorn-hover*
+
+Press K on any symbol to look up its definition. Works for structs, enums,
+variables, and imported library symbols. Shows a popup with the full
+definition.
+
+=============================================================================
+DEBUGGING                              *gjallarhorn-debugging*
+
+Set the environment variable GJALLARHORN_DEBUG=1 to enable protocol logging:
+
+  export GJALLARHORN_DEBUG=1
+
+This prints debug messages during completion and hover.
+
+=============================================================================
 CONFIGURATION                           *gjallarhorn-config*
 
 Set |g:gjallarhorn_bin| in your vimrc to customize the binary path:
@@ -25,11 +43,11 @@ Set |g:gjallarhorn_bin| in your vimrc to customize the binary path:
 
 Defaults to ~/.local/bin/gjallarhorn.
 
-==============================================================================
+=============================================================================
 DAEMON                                  *gjallarhorn-daemon*
 
 Gjallarhorn runs as a background process that listens on a Unix socket. It
 persists between Vim sessions and re-indexes files on save.
 
-==============================================================================
+=============================================================================
  vim:tw=78:ts=8:ft=help:norl:

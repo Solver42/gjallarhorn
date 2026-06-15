@@ -3,21 +3,20 @@
 
 set -e
 
-if ! command -v odin >/dev/null 2>&1; then
-    echo "ERROR: 'odin' compiler not found on PATH."
-    echo "       Install Odin from https://odin-lang.org or add it to your PATH."
-    exit 1
-fi
-
 cd "$(dirname "$0")"
 
 BINARY="gjallarhorn"
 INSTALL_DIR="$HOME/.local/bin"
 
 echo "==> Compiling $BINARY..."
-odin build . -out:"$BINARY" -o:speed
 
-if [ ! -f "$BINARY" ]; then
+if [ "$1" = "dev" ]; then
+    odin build . -out:"$BINARY"
+else
+    odin build . -out:"$BINARY" -o:speed -disable-assert -no-bounds-check
+fi
+
+if [ ! -x "$BINARY" ]; then
     echo "ERROR: compilation produced no binary."
     exit 1
 fi
@@ -27,12 +26,16 @@ install -m 755 "$BINARY" "$INSTALL_DIR/$BINARY"
 
 echo "==> Installed: $INSTALL_DIR/$BINARY"
 
-if command -v "$BINARY" >/dev/null 2>&1; then
-    echo "==> '$BINARY' is on PATH."
-else
-    echo "==> NOTE: '$INSTALL_DIR' is not on PATH."
-    echo "    Add this to your shell profile:"
-    echo "      export PATH=\"\$HOME/.local/bin:\$PATH\""
-fi
+case ":$PATH:" in
+    *":$INSTALL_DIR:"*|*":$INSTALL_DIR/"*)
+        echo "==> '$INSTALL_DIR' is on PATH."
+        ;;
+    *)
+        echo "==> NOTE: '$INSTALL_DIR' is not on PATH."
+        echo "    Add this to your shell profile:"
+        echo "      export PATH=\"\$HOME/.local/bin:\$PATH\""
+        ;;
+esac
 
-echo "Done. Open any Odin file in Vim and press Ctrl+X Ctrl+U to complete."
+echo "Done."
+echo "Open any Odin file in Vim, press Ctrl+X Ctrl+U for autocomplete, press Shift+K to peek the symbol's content."

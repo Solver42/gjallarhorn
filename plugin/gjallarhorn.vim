@@ -6,7 +6,8 @@ let g:loaded_gjallarhorn = 1
 
 let g:gjallarhorn_bin = get(g:, 'gjallarhorn_bin', expand('~/.local/bin/gjallarhorn'))
 
-let s:daemon_started = {}
+let s:daemons = {}
+let s:popup_id = v:none
 
 function! gjallarhorn#start_daemon(filepath) abort
     if !executable(g:gjallarhorn_bin)
@@ -16,22 +17,31 @@ function! gjallarhorn#start_daemon(filepath) abort
 
     let l:dir = fnamemodify(a:filepath, ':h')
 
-    if has_key(s:daemon_started, l:dir)
+    if has_key(s:daemons, l:dir)
+        let l:entry = s:daemons[l:dir]
+        if job_status(l:entry.job) == 'run'
+            return
+        endif
+        call remove(s:daemons, l:dir)
+    endif
+
+    let l:job = job_start([g:gjallarhorn_bin, '--daemon', a:filepath], {'stoponexit': 'term'})
+    if l:job is v:null
+        echom 'gjallarhorn: failed to start daemon for ' . l:dir
         return
     endif
 
-    let l:output = system(g:gjallarhorn_bin . ' --start ' . shellescape(a:filepath))
-    let s:daemon_started[l:dir] = 1
-    echom 'gjallarhorn: daemon started for ' . l:dir . ' (socket: ' . trim(l:output) . ')'
+    let s:daemons[l:dir] = {'job': l:job}
 endfunction
 
 function! gjallarhorn#index_file(filepath) abort
     if !executable(g:gjallarhorn_bin) | return | endif
     let l:dir = fnamemodify(a:filepath, ':h')
-    if !has_key(s:daemon_started, l:dir) | return | endif
+    if !has_key(s:daemons, l:dir) | return | endif
 
     " Daemon re-scans the entire directory from disk.
     call system(g:gjallarhorn_bin . ' --index ' . shellescape(a:filepath))
+    if v:shell_error != 0 | echom 'gjallarhorn: index failed (exit ' . v:shell_error . ')' | endif
 endfunction
 
 " ---------------------------------------------------------------------------
@@ -65,6 +75,8 @@ function! gjallarhorn#completefunc(findstart, base) abort
         \ shellescape(l:filepath) . ' ' .
         \ shellescape(l:buffer))
 
+    if v:shell_error != 0 | echom 'gjallarhorn: completion failed (exit ' . v:shell_error . ')' | return [] | endif
+
     let l:candidates = []
     for l:line in split(trim(l:raw), "\n")
         if l:line == '' | continue | endif
@@ -76,16 +88,37 @@ function! gjallarhorn#completefunc(findstart, base) abort
     return l:candidates
 endfunction
 
+function! gjallarhorn#show_hello() abort
+    if s:popup_id isnot v:none && !empty(popup_getpos(s:popup_id))
+        call popup_close(s:popup_id)
+        let s:popup_id = v:none
+        return
+    endif
+    let l:resp = system(g:gjallarhorn_bin . ' --hover '
+        \ . shellescape(expand('%:p')) . ' '
+        \ . shellescape(expand('<cword>')))
+    if l:resp !~# '^\s*$'
+        let l:lines = split(trim(l:resp), '\n')
+        if len(l:lines) > 0
+            let s:popup_id = popup_atcursor(l:lines, #{
+                \ border: [1, 1, 1, 1],
+                \ borderchars: ['─', '│', '─', '│', '┌', '┐', '┘', '└'],
+                \ close: 'click',
+                \ moved: 'any',
+                \ })
+        endif
+    endif
+endfunction
+
 augroup gjallarhorn
     autocmd!
     " Open: start the daemon, register completefunc, and index immediately.
     autocmd BufReadPost,BufNewFile *.odin
         \ call gjallarhorn#start_daemon(expand('<afile>:p')) |
         \ setlocal completefunc=gjallarhorn#completefunc |
-        \ call gjallarhorn#index_file(expand('<afile>:p'))
+        \ call gjallarhorn#index_file(expand('<afile>:p')) |
+        \ nnoremap <buffer> <silent> K :call gjallarhorn#show_hello()<CR>
     " Save: re-index so completions reflect the latest source.
     autocmd BufWritePost *.odin
         \ call gjallarhorn#index_file(expand('<afile>:p'))
 augroup END
-
-inoremap <silent> <C-x><C-u> <C-x><C-u>

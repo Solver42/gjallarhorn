@@ -1,3 +1,10 @@
+## 6
+
+### Added
+
+- Hover
+- Debugging
+
 ## 5
 
 ### Added

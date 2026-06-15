@@ -8,6 +8,10 @@ import "core:strings"
 import "core:sys/posix"
 import "core:unicode/utf8"
 
+debug: bool
+
+tab_spaces: string = "    "
+
 Field_Entry :: struct {
     name : string,
     type : string,
@@ -670,6 +674,23 @@ extract_parent_dir :: proc(filepath: string, allocator := context.allocator) -> 
     return strings.clone(".", allocator)
 }
 
+daemon_init_index :: proc(filepath: string) {
+    fmt.eprintfln("index rebuild begin: %s", filepath)
+    dir := extract_parent_dir(filepath)
+    defer delete(dir)
+
+    new_index := index_directory(dir, filepath)
+
+    old := g_index
+    g_index = new_index
+    index_destroy(&old)
+
+    delete(import_cache)
+    import_cache = make(map[string]Import_Result)
+
+    fmt.eprintfln("index rebuild complete: %s", filepath)
+}
+
 split_qualified_name :: proc(name: string) -> (string, string, bool) {
     for i := 0; i < len(name); i += 1 {
         if name[i] == '.' {
@@ -854,6 +875,55 @@ resolve_local_type :: proc(buffer: string, var_name: string) -> (string, bool) {
     return "", false
 }
 
+format_struct_info :: proc(name: string, entry: Struct_Entry) -> string {
+    sb := strings.builder_make()
+    strings.write_string(&sb, "struct ")
+    strings.write_string(&sb, name)
+    strings.write_string(&sb, " {\n")
+    for f in entry.fields {
+        strings.write_string(&sb, tab_spaces)
+        strings.write_string(&sb, f.name)
+        strings.write_string(&sb, ": ")
+        strings.write_string(&sb, f.type)
+        strings.write_string(&sb, ",\n")
+    }
+    strings.write_string(&sb, "}")
+    return strings.to_string(sb)
+}
+
+format_enum_info :: proc(name: string, entry: Enum_Entry) -> string {
+    sb := strings.builder_make()
+    strings.write_string(&sb, "enum ")
+    strings.write_string(&sb, name)
+    strings.write_string(&sb, " {\n")
+    for v in entry.values {
+        strings.write_string(&sb, tab_spaces)
+        strings.write_string(&sb, v)
+        strings.write_string(&sb, ",\n")
+    }
+    strings.write_string(&sb, "}")
+    return strings.to_string(sb)
+}
+
+hover_lookup :: proc(symbol: string) -> string {
+    if entry, ok := g_index.structs[symbol]; ok {
+        return format_struct_info(symbol, entry)
+    }
+    if entry, ok := g_index.enums[symbol]; ok {
+        return format_enum_info(symbol, entry)
+    }
+    if entry, ok := g_index.all_structs[symbol]; ok {
+        return format_struct_info(symbol, entry)
+    }
+    if entry, ok := g_index.all_enums[symbol]; ok {
+        return format_enum_info(symbol, entry)
+    }
+    if type_name, ok := g_index.variables[symbol]; ok {
+        return fmt.tprintf("%s: %s", symbol, type_name)
+    }
+    return ""
+}
+
 completions_from_import :: proc(alias: string, prefix: string) -> string {
     sb := strings.builder_make()
 
@@ -1028,6 +1098,13 @@ fd_write_all :: proc(fd: posix.FD, buf: []u8) {
 }
 
 frame_write :: proc(fd: posix.FD, msg: string) {
+    if debug {
+        if len(msg) <= 64 {
+            fmt.eprintfln("-> frame len=%d msg=%q", len(msg), msg)
+        } else {
+            fmt.eprintfln("-> frame len=%d (truncated)", len(msg))
+        }
+    }
     body    := transmute([]u8)msg
     msg_len := u32(len(body))
     header: [4]u8 = {u8(msg_len >> 24), u8(msg_len >> 16), u8(msg_len >> 8), u8(msg_len)}
@@ -1047,7 +1124,7 @@ frame_read :: proc(fd: posix.FD, allocator := context.allocator) -> (string, boo
         delete(body, allocator)
         return "", false
     }
-    return string(body), true
+    msg := string(body); if debug { preview := msg; if len(preview) > 80 { preview = preview[:80] }; fmt.eprintfln("<- frame len=%d preview=%q", len(msg), preview) }; return msg, true
 }
 
 SOCKET_DIR    :: "/tmp"
@@ -1064,6 +1141,28 @@ socket_path_for_dir :: proc(dirpath: string, allocator := context.allocator) -> 
     defer delete(hash_hex, allocator)
 
     return strings.join({SOCKET_DIR, "/", SOCKET_PREFIX, string(hash_hex), ".sock"}, "", allocator)
+}
+
+daemon_is_alive :: proc(sock_path: string) -> bool {
+    fd := posix.socket(.UNIX, .STREAM)
+    if int(fd) < 0 { return false }
+    defer posix.close(fd)
+
+    addr := make_sockaddr_un(sock_path)
+    if posix.connect(fd, cast(^posix.sockaddr)&addr, posix.socklen_t(size_of(addr))) == .FAIL {
+        return false
+    }
+
+    frame_write(fd, "__gh::hello__")
+    response, ok := frame_read(fd, context.temp_allocator)
+    if !ok { return false }
+
+    if strings.has_prefix(response, "gjallarhorn/") {
+        rest := strings.trim_prefix(response, "gjallarhorn/")
+        if rest == "1" { return true }
+    }
+    fmt.eprintfln("gjallarhorn: handshake mismatch from daemon at %s", sock_path)
+    return false
 }
 
 make_sockaddr_un :: proc(sock_path: string) -> posix.sockaddr_un {
@@ -1085,6 +1184,11 @@ daemon_start :: proc(filepath: string) {
 
     sock_path_c := strings.clone_to_cstring(sock_path)
     defer delete(sock_path_c)
+
+    if daemon_is_alive(sock_path) {
+        fmt.eprintln("gjallarhorn: daemon already running")
+        os.exit(1)
+    }
     posix.unlink(sock_path_c)
 
     server_fd := posix.socket(.UNIX, .STREAM)
@@ -1104,20 +1208,11 @@ daemon_start :: proc(filepath: string) {
         os.exit(1)
     }
 
-    pid := posix.fork()
-    if int(pid) < 0 {
-        fmt.eprintfln("gjallarhorn: fork() failed: %v", posix.errno())
-        os.exit(1)
-    }
-    if pid != 0 {
-        fmt.println(sock_path)
-        os.exit(0)
-    }
+    if debug { fmt.eprintfln("daemon listening: %s", sock_path) }
 
-    posix.setsid()
+    defer posix.unlink(sock_path_c)
 
-    import_cache = make(map[string]Import_Result)
-    g_index = index_directory(dir, filepath)
+    daemon_init_index(filepath)
     daemon_serve(server_fd)
 }
 
@@ -1132,8 +1227,13 @@ daemon_serve :: proc(server_fd: posix.FD) {
 
 handle_client :: proc(client_fd: posix.FD) {
     cmd, ok := frame_read(client_fd)
-    if !ok { return }
+    if !ok {
+        fmt.eprintln("gjallarhorn: protocol error: failed to read command frame")
+        return
+    }
     defer delete(cmd)
+
+    if debug { fmt.eprintfln("recv cmd: %s", cmd) }
 
     switch cmd {
     case "comp":
@@ -1146,15 +1246,27 @@ handle_client :: proc(client_fd: posix.FD) {
 
     case "index":
         filepath, path_ok := frame_read(client_fd)
-        if !path_ok { return }
+        if !path_ok {
+            fmt.eprintln("gjallarhorn: protocol error: bad frame for index command")
+            return
+        }
         defer delete(filepath)
-        dir := extract_parent_dir(filepath)
-        defer delete(dir)
-        index_destroy(&g_index)
-        g_index = index_directory(dir, filepath)
-        frame_write(client_fd, "") // acknowledge
+        daemon_init_index(filepath)
+        frame_write(client_fd, "")
+
+    case "hover":
+        symbol, sym_ok := frame_read(client_fd)
+        if !sym_ok { return }
+        defer delete(symbol)
+        result := hover_lookup(symbol)
+        defer delete(result)
+        frame_write(client_fd, result)
+
+    case "__gh::hello__":
+        frame_write(client_fd, "gjallarhorn/1")
 
     case:
+        fmt.eprintfln("gjallarhorn: protocol error: unknown command: %s", cmd)
         frame_write(client_fd, "")
     }
 }
@@ -1183,7 +1295,7 @@ client_connect :: proc(filepath: string) -> (posix.FD, bool) {
 
 client_comp :: proc(filepath: string, buffer: string) {
     fd, ok := client_connect(filepath)
-    if !ok { os.exit(1) }
+    if !ok { fmt.eprintln("gjallarhorn: cannot connect to daemon"); os.exit(2) }
     defer posix.close(fd)
 
     frame_write(fd, "comp")
@@ -1191,8 +1303,8 @@ client_comp :: proc(filepath: string, buffer: string) {
 
     response, resp_ok := frame_read(fd)
     if !resp_ok {
-        fmt.eprintfln("gjallarhorn: no response from daemon")
-        os.exit(1)
+        fmt.eprintln("gjallarhorn: daemon returned invalid frame")
+        os.exit(3)
     }
     defer delete(response)
 
@@ -1203,14 +1315,37 @@ client_comp :: proc(filepath: string, buffer: string) {
 
 client_index :: proc(filepath: string) {
     fd, ok := client_connect(filepath)
-    if !ok { os.exit(1) }
+    if !ok { fmt.eprintln("gjallarhorn: cannot connect to daemon"); os.exit(2) }
     defer posix.close(fd)
 
     frame_write(fd, "index")
     frame_write(fd, filepath)
 
-    response, _ := frame_read(fd)
+    response, resp_ok := frame_read(fd)
+    if !resp_ok {
+        fmt.eprintln("gjallarhorn: index failed (daemon did not respond)")
+        os.exit(3)
+    }
     delete(response)
+}
+
+client_hover :: proc(filepath: string, symbol: string) {
+    fd, ok := client_connect(filepath)
+    if !ok { fmt.eprintln("gjallarhorn: cannot connect to daemon"); os.exit(2) }
+    defer posix.close(fd)
+
+    frame_write(fd, "hover")
+    frame_write(fd, symbol)
+
+    response, resp_ok := frame_read(fd)
+    if !resp_ok {
+        fmt.eprintln("gjallarhorn: daemon returned invalid frame")
+        os.exit(3)
+    }
+    defer delete(response)
+
+    fmt.print(response)
+    fmt.print("\n")
 }
 
 main :: proc() {
@@ -1219,16 +1354,22 @@ main :: proc() {
         os.exit(1)
     }
 
-    switch os.args[1] {
-    case "--start":
-        daemon_start(os.args[2])
+    if v, ok := os.lookup_env_alloc("GJALLARHORN_DEBUG", context.allocator); ok { debug = v == "1"; delete(v, context.allocator) }
 
+    switch os.args[1] {
     case "--comp":
         if len(os.args) < 4 { usage(); os.exit(1) }
         client_comp(os.args[2], os.args[3])
 
     case "--index":
         client_index(os.args[2])
+
+    case "--hover":
+        if len(os.args) < 4 { usage(); os.exit(1) }
+        client_hover(os.args[2], os.args[3])
+
+    case "--daemon":
+        daemon_start(os.args[2])
 
     case:
         usage()
@@ -1238,7 +1379,8 @@ main :: proc() {
 
 usage :: proc() {
     fmt.eprintln("gjallarhorn — Odin completion daemon")
-    fmt.eprintln("  gjallarhorn --start <absolute_filepath>")
-    fmt.eprintln("  gjallarhorn --comp  <absolute_filepath> <buffer_until_cursor>")
-    fmt.eprintln("  gjallarhorn --index <absolute_filepath>")
+    fmt.eprintln("  gjallarhorn --daemon <absolute_filepath>")
+    fmt.eprintln("  gjallarhorn --comp   <absolute_filepath> <buffer_until_cursor>")
+    fmt.eprintln("  gjallarhorn --hover  <absolute_filepath> <symbol>")
+    fmt.eprintln("  gjallarhorn --index  <absolute_filepath>")
 }
