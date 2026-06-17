@@ -16,7 +16,7 @@ Completions for:
 
 The daemon re-indexes on save. No manual action needed.
 
-Press K on a symbol to see its definition in a popup window.
+Press K on a symbol to view its definition in a popup window.
 
 =============================================================================
 HOVER                                   *gjallarhorn-hover*

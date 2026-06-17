@@ -1,3 +1,17 @@
+## 7
+
+### Added
+
+- Project root detection
+
+### Changes
+
+- K toggles hover
+
+### Fixed
+
+- Daemon no longer crashes
+
 ## 6
 
 ### Added
