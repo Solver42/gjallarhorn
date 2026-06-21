@@ -61,12 +61,6 @@ and rebuild:
 sh ~/.vim/pack/plugins/start/gjallarhorn/install.sh
 ```
 
-## Debugging
-
-```sh
-export GJALLARHORN_DEBUG=1
-```
-
 ## License
 
 [MIT](LICENSE)

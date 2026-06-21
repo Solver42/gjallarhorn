@@ -1,3 +1,14 @@
+## 8
+
+### Added
+
+- Permanent socket
+- Hover on a variable shows the full struct body 
+
+### Removed
+
+- Debugging
+
 ## 7
 
 ### Added

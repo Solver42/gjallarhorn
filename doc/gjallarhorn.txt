@@ -26,15 +26,6 @@ variables, and imported library symbols. Shows a popup with the full
 definition.
 
 =============================================================================
-DEBUGGING                              *gjallarhorn-debugging*
-
-Set the environment variable GJALLARHORN_DEBUG=1 to enable protocol logging:
-
-  export GJALLARHORN_DEBUG=1
-
-This prints debug messages during completion and hover.
-
-=============================================================================
 CONFIGURATION                           *gjallarhorn-config*
 
 Set |g:gjallarhorn_bin| in your vimrc to customize the binary path:
