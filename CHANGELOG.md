@@ -1,9 +1,17 @@
+## 9
+
+### Fixed
+
+- Better memory management
+- Resolve name conflicts between imported packages
+- Lexer don't hang on broken block comment
+
 ## 8
 
 ### Added
 
-- Permanent socket
-- Hover on a variable shows the full struct body 
+- Persistent Unix socket for the daemon
+- Hover on a variable shows the full struct body
 
 ### Removed
 
@@ -15,7 +23,7 @@
 
 - Project root detection
 
-### Changes
+### Changed
 
 - K toggles hover
 
@@ -34,7 +42,7 @@
 
 ### Added
 
-- Cross-file autocomplete in the current directory
+- Cross-file autocomplete within the current directory
 
 ## 4
 
@@ -55,7 +63,7 @@
 
 ### Fixed
 
-- Resolve correct type even without unique name
+- Resolve correct type even without a unique name
 
 ## 1
 
