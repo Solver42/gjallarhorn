@@ -55,6 +55,16 @@ Project_Index :: struct {
 g_persistent_allocator: mem.Allocator
 g_index : Project_Index
 
+g_file_hash_cache : map[string]string
+
+File_Symbol_Names :: struct {
+    struct_names     : [dynamic]string,
+    enum_names       : [dynamic]string,
+    variable_names   : [dynamic]string,
+    import_aliases   : [dynamic]string,
+}
+g_file_symbols : map[string]File_Symbol_Names
+
 make_project_index :: proc() -> Project_Index {
     return Project_Index{
         own_structs              = make(map[string]Struct_Definition),
@@ -517,12 +527,36 @@ index_directory :: proc(idx: ^Project_Index, dir_path: string) -> bool {
 
         full_path := strings.concatenate({dir_path, "/", fi.name}, context.allocator)
         src_data, read_err := os.read_entire_file_from_path(full_path, context.allocator)
-        delete(full_path, context.allocator)
-        if read_err != nil { continue }
+        if read_err != nil { delete(full_path, context.allocator); continue }
 
         file_idx := parse_source_file(string(src_data))
         merge_file_into_index(idx, &file_idx)
+
+        hash := md5_hex(src_data)
+        g_file_hash_cache[full_path] = hash
+
+        syms := File_Symbol_Names{
+            struct_names     = make([dynamic]string),
+            enum_names       = make([dynamic]string),
+            variable_names   = make([dynamic]string),
+            import_aliases   = make([dynamic]string),
+        }
+        for name in file_idx.own_structs {
+            append(&syms.struct_names, strings.clone(name))
+        }
+        for name in file_idx.own_enums {
+            append(&syms.enum_names, strings.clone(name))
+        }
+        for name in file_idx.own_variables {
+            append(&syms.variable_names, strings.clone(name))
+        }
+        for alias in file_idx.import_aliases {
+            append(&syms.import_aliases, strings.clone(alias))
+        }
+        g_file_symbols[full_path] = syms
+
         delete(src_data, context.allocator)
+        delete(full_path, context.allocator)
         found = true
     }
 
@@ -687,6 +721,15 @@ package_cache_destroy :: proc(cache: ^map[string]Package_Symbols) {
     delete(cache^)
 }
 
+md5_hex :: proc(data: []u8) -> string {
+    ctx: md5.Context
+    md5.init(&ctx)
+    md5.update(&ctx, data)
+    digest: [md5.DIGEST_SIZE]u8
+    md5.final(&ctx, digest[:])
+    return string(hex.encode(digest[:], context.allocator))
+}
+
 build_index :: proc(project_root: string, any_project_file: string) {
     fmt.eprintfln("index build begin  root=%s", project_root)
 
@@ -709,7 +752,77 @@ build_index :: proc(project_root: string, any_project_file: string) {
 
 rebuild_index :: proc(trigger_file: string) {
     fmt.eprintfln("index rebuild trigger=%s", trigger_file)
-    build_index(g_project_root, trigger_file)
+
+    src_data, read_err := os.read_entire_file_from_path(trigger_file, context.temp_allocator)
+    if read_err != nil {
+        fmt.eprintfln("index rebuild error reading file=%s", trigger_file)
+        return
+    }
+
+    hash := md5_hex(src_data)
+
+    cached_hash, was_cached := g_file_hash_cache[trigger_file]
+    if was_cached && cached_hash == hash {
+        delete(hash)
+        fmt.eprintfln("index rebuild skipped (unchanged) trigger=%s", trigger_file)
+        return
+    }
+
+    // Remove old symbols contributed by this file
+    if old_syms, ok := g_file_symbols[trigger_file]; ok {
+        for name in old_syms.struct_names {
+            delete_key(&g_index.own_structs, name)
+        }
+        for name in old_syms.enum_names {
+            delete_key(&g_index.own_enums, name)
+        }
+        for name in old_syms.variable_names {
+            delete_key(&g_index.own_variables, name)
+        }
+        for alias in old_syms.import_aliases {
+            delete_key(&g_index.import_aliases, alias)
+        }
+        delete(old_syms.struct_names)
+        delete(old_syms.enum_names)
+        delete(old_syms.variable_names)
+        delete(old_syms.import_aliases)
+        delete_key(&g_file_symbols, trigger_file)
+    }
+
+    // Parse and merge new content
+    file_idx := parse_source_file(string(src_data))
+    merge_file_into_index(&g_index, &file_idx)
+
+    // Update hash cache — transfer ownership, free old entry first
+    if old_hash, had_old := g_file_hash_cache[trigger_file]; had_old {
+        delete(old_hash)
+    }
+    g_file_hash_cache[trigger_file] = hash
+
+    // Track new symbol names
+    syms := File_Symbol_Names{
+        struct_names     = make([dynamic]string),
+        enum_names       = make([dynamic]string),
+        variable_names   = make([dynamic]string),
+        import_aliases   = make([dynamic]string),
+    }
+    for name in file_idx.own_structs {
+        append(&syms.struct_names, strings.clone(name))
+    }
+    for name in file_idx.own_enums {
+        append(&syms.enum_names, strings.clone(name))
+    }
+    for name in file_idx.own_variables {
+        append(&syms.variable_names, strings.clone(name))
+    }
+    for alias in file_idx.import_aliases {
+        append(&syms.import_aliases, strings.clone(alias))
+    }
+    g_file_symbols[trigger_file] = syms
+
+    resolve_and_load_imports(&g_index, trigger_file)
+
+    fmt.eprintfln("index rebuild complete trigger=%s", trigger_file)
 }
 
 split_at_dot :: proc(name: string) -> (before, after: string, found: bool) {
@@ -1159,6 +1272,7 @@ handle_client :: proc(client_fd: posix.FD) {
         case "index":
             path, path_ok := read_frame(client_fd, context.temp_allocator)
             if !path_ok { return }
+            context.allocator = g_persistent_allocator
             rebuild_index(path)
             write_frame(client_fd, "")
 

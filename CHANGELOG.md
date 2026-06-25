@@ -1,3 +1,7 @@
+## 10
+
+- Only re-indexes files that actually changed
+
 ## 9
 
 ### Fixed
