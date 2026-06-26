@@ -1,33 +1,48 @@
 # gjallarhorn
 
-Odin tool for [Vim](https://github.com/vim/vim)
+A lightweight Vim plugin that provides autocomplete, view definition and go to definition for the Odin language.
 
 ## Requirements
 
 - [Odin](https://odin-lang.org) compiler (to build)
 - A POSIX system
-- Vim 8.2+
+- [Vim](https://github.com/vim/vim) 8.2+
 
 ## Install
 
+Create the pack directory if it doesn't exist:
 ```sh
 mkdir -p ~/.vim/pack/plugins/start
+```
+
+Clone the repository:
+```sh
 git clone https://github.com/Solver42/gjallarhorn ~/.vim/pack/plugins/start/gjallarhorn
+```
+
+Compile the `gjallarhorn` binary and install it under `~/.local/bin`:
+```sh
 sh ~/.vim/pack/plugins/start/gjallarhorn/install.sh
+```
+
+## Update
+
+```sh
+cd ~/.vim/pack/plugins/start/gjallarhorn
+git pull
+sh install.sh
 ```
 
 ## Usage
 
-Open an `.odin` file, type a name followed by a dot, press `Ctrl+X Ctrl+U`
-Use `Ctrl+N` / `Ctrl+P` to cycle
-
-Completions for struct fields, enum values, type aliases, imported library
-symbols, and chained member access (`a.b.c.`). Re-indexes on save
-
-Press `K` on any symbol to view its definition in a popup window
+Type a name followed by a dot, press `Ctrl+X Ctrl+U` for autocomplete, use `Ctrl+N` / `Ctrl+P` to cycle<br>
+Completions for struct fields, enum values, type aliases, imported library symbols, and chained member access (`a.b.c.`)<br>
+Press `K` on any symbol to view its definition in a popup window<br>
+Press `gd` on any symbol to jump to its definition<br>
 
 ## How it works
 
+It indexes the project on startup and re-indexes on save<br>
 When you open an `.odin` file, gjallarhorn searches for a project root by
 walking up the directory tree until it finds a marker file (`.git`,
 `.editorconfig`, or `gjallar.horn`). The directory containing the marker

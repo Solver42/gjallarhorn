@@ -1,3 +1,9 @@
+## 11
+
+### Added
+
+- Go to definition
+
 ## 10
 
 - Only re-indexes files that actually changed

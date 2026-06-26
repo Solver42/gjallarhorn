@@ -196,7 +196,7 @@ function! gjallarhorn#completefunc(findstart, base) abort
     return l:candidates
 endfunction
 
-function! gjallarhorn#show_hover() abort
+function! gjallarhorn#toggle_hover() abort
     if s:hover_popup_id isnot v:none
         if exists('*popup_getpos') && !empty(popup_getpos(s:hover_popup_id))
             call popup_close(s:hover_popup_id)
@@ -226,14 +226,28 @@ function! gjallarhorn#show_hover() abort
     endif
 endfunction
 
+function! gjallarhorn#goto_definition() abort
+    let l:word = expand('<cword>')
+    if empty(l:word) | return | endif
+    let l:resp = s:request(expand('%:p'), ['goto', l:word])
+    if l:resp ==# ''
+        silent! normal! gd
+        return
+    endif
+    let l:parts = split(l:resp, "\x00")
+    if len(l:parts) < 3 | return | endif
+    execute 'edit' fnameescape(l:parts[0])
+    call cursor(l:parts[1], l:parts[2])
+endfunction
+
 augroup gjallarhorn
     autocmd!
-
     autocmd BufReadPost,BufNewFile *.odin
-        \ call gjallarhorn#ensure_daemon(expand('<afile>:p'))   |
-        \ setlocal completefunc=gjallarhorn#completefunc        |
-        \ call gjallarhorn#index_sync(expand('<afile>:p'))      |
-        \ nnoremap <buffer> <silent> K :call gjallarhorn#show_hover()<CR>
+        \ call gjallarhorn#ensure_daemon(expand('<afile>:p'))|
+        \ setlocal completefunc=gjallarhorn#completefunc|
+        \ call gjallarhorn#index_sync(expand('<afile>:p'))|
+        \ nnoremap <buffer> <silent> K :call gjallarhorn#toggle_hover()<CR>|
+        \ nnoremap <buffer> <silent> gd :call gjallarhorn#goto_definition()<CR>
 
     autocmd BufWritePost *.odin
         \ call gjallarhorn#index_async(expand('<afile>:p'))

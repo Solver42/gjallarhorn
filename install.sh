@@ -23,4 +23,4 @@ case ":$PATH:" in
 esac
 
 echo "Installed $INSTALL_DIR/$BINARY"
-echo "Open any Odin file in Vim — Ctrl+X Ctrl+U to complete, K to hover."
+echo "Open any Odin file in Vim — Ctrl+X Ctrl+U to complete, K to hover and gd to go to definition"
