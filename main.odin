@@ -4,6 +4,7 @@ import "core:crypto/legacy/md5"
 import "core:encoding/hex"
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
 import "core:mem"
@@ -193,30 +194,20 @@ lexer_peek :: proc(l: ^Lexer) -> Token {
 }
 
 dir_contains_root_marker :: proc(dir: string) -> bool {
-    entries, err := os.read_all_directory_by_path(dir, context.allocator)
-    if err != nil { return false }
-    defer os.file_info_slice_delete(entries, context.allocator)
-    for e in entries {
-        for m in project_root_markers { if e.name == m { return true } }
+    for m in project_root_markers {
+        path := strings.concatenate({dir, "/", m}, context.temp_allocator)
+        if _, err := os.stat(path, context.temp_allocator); err == nil { return true }
     }
     return false
 }
 
 find_project_root :: proc(start_dir: string, allocator := context.allocator) -> string {
-    current := strings.clone(start_dir, context.allocator)
+    cur := start_dir
     for {
-        if dir_contains_root_marker(current) { return strings.clone(current, allocator) }
-
-        end := len(current) - 1
-        for end > 0 && current[end] == '/' { end -= 1 }
-
-        slash := -1
-        for i := end; i >= 0; i -= 1 { if current[i] == '/' { slash = i; break } }
+        if dir_contains_root_marker(cur) { return strings.clone(cur, allocator) }
+        slash := strings.last_index_byte(cur, '/')
         if slash <= 0 { break }
-        
-        next := strings.clone(current[:slash], context.allocator)
-        delete(current, context.allocator)
-        current = next
+        cur = cur[:slash]
     }
     return strings.clone(start_dir, allocator)
 }
@@ -231,19 +222,18 @@ derive_import_alias :: proc(path: string) -> string {
 }
 
 parse_dotted_type_name :: proc(l: ^Lexer, first: string) -> string {
-    parts := make([dynamic]string, context.allocator)
-    defer delete(parts)
-    append(&parts, first)
+    sb := strings.builder_make()
+    strings.write_string(&sb, first)
     for {
         pk := lexer_peek(l)
         if pk.kind != .Other || pk.text != "." { break }
         lexer_next(l)
         name := lexer_next(l)
         if name.kind != .Identifier { break }
-        append(&parts, ".")
-        append(&parts, name.text)
+        strings.write_byte(&sb, '.')
+        strings.write_string(&sb, name.text)
     }
-    return strings.join(parts[:], "")
+    return strings.to_string(sb)
 }
 
 parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
@@ -565,23 +555,15 @@ index_directory :: proc(idx: ^Project_Index, dir_path: string) -> bool {
         g_file_hash_cache[full_path] = hash
 
         syms := File_Symbol_Names{
-            struct_names     = make([dynamic]string),
-            enum_names       = make([dynamic]string),
-            variable_names   = make([dynamic]string),
-            import_aliases   = make([dynamic]string),
+            struct_names   = make([dynamic]string),
+            enum_names     = make([dynamic]string),
+            variable_names = make([dynamic]string),
+            import_aliases = make([dynamic]string),
         }
-        for name in file_idx.own_structs {
-            append(&syms.struct_names, strings.clone(name))
-        }
-        for name in file_idx.own_enums {
-            append(&syms.enum_names, strings.clone(name))
-        }
-        for name in file_idx.own_variables {
-            append(&syms.variable_names, strings.clone(name))
-        }
-        for alias in file_idx.import_aliases {
-            append(&syms.import_aliases, strings.clone(alias))
-        }
+        for name in file_idx.own_structs   { append(&syms.struct_names,   strings.clone(name)) }
+        for name in file_idx.own_enums     { append(&syms.enum_names,     strings.clone(name)) }
+        for name in file_idx.own_variables { append(&syms.variable_names, strings.clone(name)) }
+        for alias in file_idx.import_aliases { append(&syms.import_aliases, strings.clone(alias)) }
         g_file_symbols[full_path] = syms
 
         delete(src_data, context.allocator)
@@ -834,23 +816,15 @@ rebuild_index :: proc(trigger_file: string) {
 
     // Track new symbol names
     syms := File_Symbol_Names{
-        struct_names     = make([dynamic]string),
-        enum_names       = make([dynamic]string),
-        variable_names   = make([dynamic]string),
-        import_aliases   = make([dynamic]string),
+        struct_names   = make([dynamic]string),
+        enum_names     = make([dynamic]string),
+        variable_names = make([dynamic]string),
+        import_aliases = make([dynamic]string),
     }
-    for name in file_idx.own_structs {
-        append(&syms.struct_names, strings.clone(name))
-    }
-    for name in file_idx.own_enums {
-        append(&syms.enum_names, strings.clone(name))
-    }
-    for name in file_idx.own_variables {
-        append(&syms.variable_names, strings.clone(name))
-    }
-    for alias in file_idx.import_aliases {
-        append(&syms.import_aliases, strings.clone(alias))
-    }
+    for name in file_idx.own_structs   { append(&syms.struct_names,   strings.clone(name)) }
+    for name in file_idx.own_enums     { append(&syms.enum_names,     strings.clone(name)) }
+    for name in file_idx.own_variables { append(&syms.variable_names, strings.clone(name)) }
+    for alias in file_idx.import_aliases { append(&syms.import_aliases, strings.clone(alias)) }
     g_file_symbols[trigger_file] = syms
 
     resolve_and_load_imports(&g_index, trigger_file)
@@ -958,6 +932,16 @@ resolve_local_var_type :: proc(buffer: string, var_name: string) -> (string, boo
     is_ident :: proc(b: byte) -> bool {
         return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
     }
+    scan_dotted_ident :: proc(s: string, is_ident: proc(byte) -> bool) -> int {
+        end := 0
+        for end < len(s) && is_ident(s[end]) { end += 1 }
+        for end < len(s) && s[end] == '.' {
+            end += 1; seg := end
+            for end < len(s) && is_ident(s[end]) { end += 1 }
+            if seg == end { end -= 1; break }
+        }
+        return end
+    }
 
     scan_pos := len(buffer)
     for scan_pos > 0 {
@@ -971,28 +955,15 @@ resolve_local_var_type :: proc(buffer: string, var_name: string) -> (string, boo
 
         if len(rest) > 0 && rest[0] == ':' && (len(rest) == 1 || rest[1] != '=') {
             after := strings.trim_left(rest[1:], " \t")
-            end := 0
-            for end < len(after) && is_ident(after[end]) { end += 1 }
-            for end < len(after) && after[end] == '.' {
-                end += 1; seg_start := end
-                for end < len(after) && is_ident(after[end]) { end += 1 }
-                if seg_start == end { break }
-            }
-            if end > 0 { return after[:end], true }
+            if end := scan_dotted_ident(after, is_ident); end > 0 { return after[:end], true }
         }
 
         if strings.has_prefix(rest, ":=") {
             after := strings.trim_left(rest[2:], " \t")
-            end := 0
-            for end < len(after) && is_ident(after[end]) { end += 1 }
-            for end < len(after) && after[end] == '.' {
-                end += 1; seg_start := end
-                for end < len(after) && is_ident(after[end]) { end += 1 }
-                if seg_start == end { break }
-            }
-            if end > 0 {
-                remainder := strings.trim_left(after[end:], " \t")
-                if len(remainder) > 0 && remainder[0] == '{' { return after[:end], true }
+            if end := scan_dotted_ident(after, is_ident); end > 0 {
+                if remainder := strings.trim_left(after[end:], " \t"); len(remainder) > 0 && remainder[0] == '{' {
+                    return after[:end], true
+                }
             }
         }
     }
@@ -1103,29 +1074,27 @@ completions_unqualified :: proc(prefix: string) -> string {
     }
     for name in g_index.all_imported_structs {
         if name in g_index.own_structs { continue }
-        if name in g_index.imported_struct_conflicts {
-            if strings.has_prefix(name, prefix) {
-                strings.write_string(&sb, name)
-                strings.write_string(&sb, "\tambiguous: ")
-                strings.write_string(&sb, strings.join(g_index.imported_struct_conflicts[name][:], ", "))
-                strings.write_byte(&sb, '\n')
-            }
+        if !strings.has_prefix(name, prefix) { continue }
+        strings.write_string(&sb, name)
+        if conflicts, is_conflict := g_index.imported_struct_conflicts[name]; is_conflict {
+            strings.write_string(&sb, "\tambiguous: ")
+            for c, i in conflicts { if i > 0 { strings.write_string(&sb, ", ") }; strings.write_string(&sb, c) }
         } else {
-            if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_string(&sb, "\timport\n") }
+            strings.write_string(&sb, "\timport")
         }
+        strings.write_byte(&sb, '\n')
     }
     for name in g_index.all_imported_enums {
         if name in g_index.own_enums { continue }
-        if name in g_index.imported_enum_conflicts {
-            if strings.has_prefix(name, prefix) {
-                strings.write_string(&sb, name)
-                strings.write_string(&sb, "\tambiguous: ")
-                strings.write_string(&sb, strings.join(g_index.imported_enum_conflicts[name][:], ", "))
-                strings.write_byte(&sb, '\n')
-            }
+        if !strings.has_prefix(name, prefix) { continue }
+        strings.write_string(&sb, name)
+        if conflicts, is_conflict := g_index.imported_enum_conflicts[name]; is_conflict {
+            strings.write_string(&sb, "\tambiguous: ")
+            for c, i in conflicts { if i > 0 { strings.write_string(&sb, ", ") }; strings.write_string(&sb, c) }
         } else {
-            if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_string(&sb, "\timport\n") }
+            strings.write_string(&sb, "\timport")
         }
+        strings.write_byte(&sb, '\n')
     }
     for name, type_name in g_index.own_variables {
         if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, type_name); strings.write_byte(&sb, '\n') }
@@ -1195,23 +1164,8 @@ write_frame :: proc(fd: posix.FD, msg: string) -> bool {
 read_frame :: proc(fd: posix.FD, allocator := context.allocator) -> (string, bool) {
     hdr: [8]u8
     if !fd_read_exactly(fd, hdr[:]) { return "", false }
-    
-    n: int = 0
-    for i := 0; i < 8; i += 1 {
-        c := hdr[i]
-        val: int = 0
-        if c >= '0' && c <= '9' {
-            val = int(c - '0')
-        } else if c >= 'a' && c <= 'f' {
-            val = int(c - 'a' + 10)
-        } else if c >= 'A' && c <= 'F' {
-            val = int(c - 'A' + 10)
-        } else {
-            return "", false
-        }
-        n = (n << 4) | val
-    }
-    
+    n, ok := strconv.parse_int(string(hdr[:]), 16)
+    if !ok                { return "", false }
     if n > MAX_FRAME_BYTES { return "", false }
     if n == 0              { return "", true  }
     body := make([]u8, n, allocator)

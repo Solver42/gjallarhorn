@@ -1,3 +1,9 @@
+## 12
+
+### Changed
+
+Faster startup and lower memory usage
+
 ## 11
 
 ### Added

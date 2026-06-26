@@ -4,7 +4,7 @@ A lightweight Vim plugin that provides autocomplete, view definition and go to d
 
 ## Requirements
 
-- [Odin](https://odin-lang.org) compiler (to build)
+- [Odin](https://odin-lang.org) compiler to build
 - A POSIX system
 - [Vim](https://github.com/vim/vim) 8.2+
 
@@ -27,16 +27,23 @@ sh ~/.vim/pack/plugins/start/gjallarhorn/install.sh
 
 ## Update
 
+Change directory
 ```sh
 cd ~/.vim/pack/plugins/start/gjallarhorn
+```
+Get the latest version
+```sh
 git pull
+```
+Install the new version
+```sh
 sh install.sh
 ```
 
 ## Usage
 
 Type a name followed by a dot, press `Ctrl+X Ctrl+U` for autocomplete, use `Ctrl+N` / `Ctrl+P` to cycle<br>
-Completions for struct fields, enum values, type aliases, imported library symbols, and chained member access (`a.b.c.`)<br>
+Completions for struct fields, enum values, type aliases, imported library symbols, and chained member access `a.b.c.`<br>
 Press `K` on any symbol to view its definition in a popup window<br>
 Press `gd` on any symbol to jump to its definition<br>
 
@@ -44,8 +51,8 @@ Press `gd` on any symbol to jump to its definition<br>
 
 It indexes the project on startup and re-indexes on save<br>
 When you open an `.odin` file, gjallarhorn searches for a project root by
-walking up the directory tree until it finds a marker file (`.git`,
-`.editorconfig`, or `gjallar.horn`). The directory containing the marker
+walking up the directory tree until it finds a marker file `.git`, `.editorconfig`, or `gjallar.horn`<br>
+The directory containing the marker
 becomes the project root
 
 A simple way to mark the project root is to create a `gjallar.horn` file:
@@ -64,7 +71,7 @@ let g:gjallarhorn_bin = expand('~/.local/bin/gjallarhorn')
 
 Defaults to `~/.local/bin/gjallarhorn`
 
-To customize which filenames are treated as markers, edit the
+To customize which filenames are treated as root markers, edit the
 `project_root_markers` array in `main.odin`:
 
 ```odin

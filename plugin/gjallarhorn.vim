@@ -153,21 +153,17 @@ function! s:request(filepath, frames) abort
     return s:read_frame(l:ch)
 endfunction
 
-function! s:request_async(filepath, frames) abort
-    let l:ch = s:daemon_channel(a:filepath)
-    if l:ch is v:null | return | endif
-    for l:frame in a:frames
-        call ch_sendraw(l:ch, s:encode_frame(l:frame))
-    endfor
-    call s:read_frame(l:ch)
-endfunction
-
 function! gjallarhorn#index_sync(filepath) abort
     call s:request(a:filepath, ['index', a:filepath])
 endfunction
 
 function! gjallarhorn#index_async(filepath) abort
-    call s:request_async(a:filepath, ['index', a:filepath])
+    let l:ch = s:daemon_channel(a:filepath)
+    if l:ch is v:null | return | endif
+    call ch_sendraw(l:ch, s:encode_frame('index'))
+    call ch_sendraw(l:ch, s:encode_frame(a:filepath))
+    " drain response without blocking — ch_read with timeout 0
+    call ch_read(l:ch, {'timeout': 0})
 endfunction
 
 function! gjallarhorn#completefunc(findstart, base) abort
