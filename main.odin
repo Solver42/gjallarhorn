@@ -106,26 +106,20 @@ advance_pos :: proc(l: ^Lexer) {
 lexer_skip_whitespace_and_comments :: proc(l: ^Lexer) {
     for l.pos < len(l.src) {
         c := l.src[l.pos]
-        if c == ' ' || c == '\t' || c == '\r' || c == '\n' { advance_pos(l); continue }
+        // Hot path: most bytes are spaces/newlines — avoid advance_pos call overhead.
+        if c == ' ' || c == '\t' || c == '\r' { l.pos += 1; l.col += 1; continue }
+        if c == '\n'                           { l.pos += 1; l.line += 1; l.col = 1; continue }
 
         if c == '/' && l.pos + 1 < len(l.src) {
             if l.src[l.pos + 1] == '/' {
-                for l.pos < len(l.src) && l.src[l.pos] != '\n' { advance_pos(l) }
+                for l.pos < len(l.src) && l.src[l.pos] != '\n' { l.pos += 1 }
                 continue
             }
             if l.src[l.pos + 1] == '*' {
                 l.pos += 2; l.col += 2
-                found_close := false
                 for l.pos + 1 < len(l.src) {
-                    if l.src[l.pos] == '*' && l.src[l.pos + 1] == '/' {
-                        l.pos += 2; l.col += 2
-                        found_close = true
-                        break
-                    }
-                    advance_pos(l)
-                }
-                if !found_close {
-                    l.pos = len(l.src)
+                    if l.src[l.pos] == '*' && l.src[l.pos + 1] == '/' { l.pos += 2; l.col += 2; break }
+                    if l.src[l.pos] == '\n' { l.pos += 1; l.line += 1; l.col = 1 } else { l.pos += 1; l.col += 1 }
                 }
                 continue
             }
@@ -147,7 +141,7 @@ lexer_next :: proc(l: ^Lexer) -> Token {
         for l.pos < len(l.src) {
             b := l.src[l.pos]
             if b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
-                advance_pos(l)
+                l.pos += 1; l.col += 1
             } else { break }
         }
         return {kind = .Identifier, text = l.src[start:l.pos], line = start_line, col = start_col}
@@ -482,7 +476,10 @@ load_package_symbols :: proc(package_dir: string) {
 register_package_into_index :: proc(idx: ^Project_Index, alias: string, package_dir: string) {
     cached, ok := g_package_cache[package_dir]
     if !ok { return }
-    if alias != "." { idx.imported_package_dirs[strings.clone(alias)] = strings.clone(package_dir) }
+    if alias != "." {
+        if existing, already := idx.imported_package_dirs[alias]; already && existing == package_dir { return }
+        idx.imported_package_dirs[strings.clone(alias)] = strings.clone(package_dir)
+    }
     for name, defn in cached.structs {
         if name not_in idx.own_structs {
             if name not_in idx.all_imported_structs {
@@ -785,18 +782,10 @@ rebuild_index :: proc(trigger_file: string) {
 
     // Remove old symbols contributed by this file
     if old_syms, ok := g_file_symbols[trigger_file]; ok {
-        for name in old_syms.struct_names {
-            delete_key(&g_index.own_structs, name)
-        }
-        for name in old_syms.enum_names {
-            delete_key(&g_index.own_enums, name)
-        }
-        for name in old_syms.variable_names {
-            delete_key(&g_index.own_variables, name)
-        }
-        for alias in old_syms.import_aliases {
-            delete_key(&g_index.import_aliases, alias)
-        }
+        for name in old_syms.struct_names  { delete_key(&g_index.own_structs,   name) }
+        for name in old_syms.enum_names    { delete_key(&g_index.own_enums,     name) }
+        for name in old_syms.variable_names{ delete_key(&g_index.own_variables, name) }
+        for alias in old_syms.import_aliases{ delete_key(&g_index.import_aliases, alias) }
         delete(old_syms.struct_names)
         delete(old_syms.enum_names)
         delete(old_syms.variable_names)
@@ -804,17 +793,12 @@ rebuild_index :: proc(trigger_file: string) {
         delete_key(&g_file_symbols, trigger_file)
     }
 
-    // Parse and merge new content
     file_idx := parse_source_file(trigger_file, string(src_data))
     merge_file_into_index(&g_index, &file_idx)
 
-    // Update hash cache — transfer ownership, free old entry first
-    if old_hash, had_old := g_file_hash_cache[trigger_file]; had_old {
-        delete(old_hash)
-    }
+    if old_hash, had_old := g_file_hash_cache[trigger_file]; had_old { delete(old_hash) }
     g_file_hash_cache[trigger_file] = hash
 
-    // Track new symbol names
     syms := File_Symbol_Names{
         struct_names   = make([dynamic]string),
         enum_names     = make([dynamic]string),
@@ -846,29 +830,11 @@ package_by_alias :: proc(alias: string) -> ^Package_Symbols {
     return nil
 }
 
-completions_for_buffer :: proc(buffer: string) -> string {
-    word_end := len(buffer)
-    word_start := word_end
-    for word_start > 0 {
-        b := buffer[word_start - 1]
-        if b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
-            word_start -= 1
-        } else { break }
-    }
-    prefix := buffer[word_start:word_end]
-
-    dot_pos := word_start - 1
-    if dot_pos < 0 || buffer[dot_pos] != '.' { return completions_unqualified(prefix) }
-
-    chain_end   := dot_pos
-    chain_start := chain_end
-    for chain_start > 0 {
-        b := buffer[chain_start - 1]
-        if b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
-           (b >= '0' && b <= '9') || b == '.' { chain_start -= 1 } else { break }
-    }
-    dot_chain := buffer[chain_start:chain_end]
-    if dot_chain == "" { return "" }
+// Vim sends three frames: prefix, dot_chain, local_ctx (last N lines before cursor).
+// dot_chain is empty for unqualified completions.
+// local_ctx is used only for local variable type inference.
+completions_for_request :: proc(prefix: string, dot_chain: string, local_ctx: string) -> string {
+    if dot_chain == "" { return completions_unqualified(prefix) }
 
     segments      := strings.split(dot_chain, ".")
     defer delete(segments)
@@ -887,9 +853,9 @@ completions_for_buffer :: proc(buffer: string) -> string {
                 segment_start = len(segments)
             }
         }
-        if current_type == "" { current_type = resolve_name_to_type(segments[0], buffer); segment_start = 1 }
+        if current_type == "" { current_type = resolve_name_to_type(segments[0], local_ctx); segment_start = 1 }
     } else {
-        current_type = resolve_name_to_type(segments[0], buffer)
+        current_type = resolve_name_to_type(segments[0], local_ctx)
     }
 
     if current_type == "" { return "" }
@@ -913,22 +879,22 @@ completions_for_buffer :: proc(buffer: string) -> string {
         current_type = next_type
     }
 
-    return completions_for_type(current_type, prefix, buffer)
+    return completions_for_type(current_type, prefix, local_ctx)
 }
 
-resolve_name_to_type :: proc(name: string, buffer: string) -> string {
-    if name in g_index.own_structs          { return name }
-    if name in g_index.own_enums            { return name }
+resolve_name_to_type :: proc(name: string, local_ctx: string) -> string {
+    if name in g_index.own_structs               { return name }
+    if name in g_index.own_enums                 { return name }
     if name in g_index.imported_struct_conflicts { return "" }
-    if name in g_index.all_imported_structs { return name }
+    if name in g_index.all_imported_structs      { return name }
     if name in g_index.imported_enum_conflicts   { return "" }
-    if name in g_index.all_imported_enums   { return name }
-    if t, ok := g_index.own_variables[name]; ok { return t }
-    if t, ok := resolve_local_var_type(buffer, name); ok { return t }
+    if name in g_index.all_imported_enums        { return name }
+    if t, ok := g_index.own_variables[name]; ok  { return t }
+    if t, ok := resolve_local_var_type(local_ctx, name); ok { return t }
     return ""
 }
 
-resolve_local_var_type :: proc(buffer: string, var_name: string) -> (string, bool) {
+resolve_local_var_type :: proc(local_ctx: string, var_name: string) -> (string, bool) {
     is_ident :: proc(b: byte) -> bool {
         return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
     }
@@ -943,15 +909,28 @@ resolve_local_var_type :: proc(buffer: string, var_name: string) -> (string, boo
         return end
     }
 
-    scan_pos := len(buffer)
+    scan_pos := len(local_ctx)
     for scan_pos > 0 {
         line_end := scan_pos; scan_pos -= 1
-        for scan_pos > 0 && buffer[scan_pos - 1] != '\n' { scan_pos -= 1 }
-        line := strings.trim_space(buffer[scan_pos:line_end])
+        for scan_pos > 0 && local_ctx[scan_pos - 1] != '\n' { scan_pos -= 1 }
+        line := strings.trim_space(local_ctx[scan_pos:line_end])
 
-        if !strings.has_prefix(line, var_name) { continue }
-        if len(line) > len(var_name) && is_ident(line[len(var_name)]) { continue }
-        rest := strings.trim_left(line[len(var_name):], " \t")
+        // Find var_name anywhere on the line (covers proc parameters mid-line).
+        search_from := 0
+        found_rest  := false
+        rest        := ""
+        for search_from < len(line) {
+            idx := strings.index(line[search_from:], var_name)
+            if idx == -1 { break }
+            abs := search_from + idx
+            if abs > 0 && is_ident(line[abs - 1]) { search_from = abs + 1; continue }
+            after_name := abs + len(var_name)
+            if after_name < len(line) && is_ident(line[after_name]) { search_from = abs + 1; continue }
+            rest = strings.trim_left(line[after_name:], " \t")
+            found_rest = true
+            break
+        }
+        if !found_rest { continue }
 
         if len(rest) > 0 && rest[0] == ':' && (len(rest) == 1 || rest[1] != '=') {
             after := strings.trim_left(rest[1:], " \t")
@@ -992,7 +971,21 @@ format_enum :: proc(name: string, defn: Enum_Definition) -> string {
     return strings.to_string(sb)
 }
 
-hover_info :: proc(symbol: string) -> string {
+hover_for_type :: proc(type_name: string) -> string {
+    if d, found := g_index.own_structs[type_name];          found { return format_struct(type_name, d) }
+    if d, found := g_index.own_enums[type_name];            found { return format_enum(type_name, d)   }
+    if d, found := g_index.all_imported_structs[type_name]; found { return format_struct(type_name, d) }
+    if d, found := g_index.all_imported_enums[type_name];   found { return format_enum(type_name, d)   }
+    if alias, name, has_dot := split_at_dot(type_name); has_dot {
+        if pkg := package_by_alias(alias); pkg != nil {
+            if d, found := pkg.structs[name]; found { return format_struct(name, d) }
+            if d, found := pkg.enums[name];   found { return format_enum(name, d)   }
+        }
+    }
+    return ""
+}
+
+hover_info :: proc(symbol: string, local_ctx: string) -> string {
     if d, ok := g_index.own_structs[symbol];          ok { return format_struct(symbol, d) }
     if d, ok := g_index.own_enums[symbol];            ok { return format_enum(symbol, d)   }
     if symbol in g_index.imported_struct_conflicts {
@@ -1004,17 +997,22 @@ hover_info :: proc(symbol: string) -> string {
     if d, ok := g_index.all_imported_structs[symbol]; ok { return format_struct(symbol, d) }
     if d, ok := g_index.all_imported_enums[symbol];   ok { return format_enum(symbol, d)   }
 
-    if type_name, ok := g_index.own_variables[symbol]; ok {
+    // Resolve through variable/parameter type — indexed globals first, then local ctx.
+    type_name := ""
+    if t, ok := g_index.own_variables[symbol]; ok {
+        type_name = t
+    } else if t, ok := resolve_local_var_type(local_ctx, symbol); ok {
+        type_name = t
+    }
+
+    if type_name != "" {
         if type_name in g_index.imported_struct_conflicts {
             return fmt.tprintf("%s: ambiguous (defined in %s)", symbol, strings.join(g_index.imported_struct_conflicts[type_name][:], ", "))
         }
         if type_name in g_index.imported_enum_conflicts {
             return fmt.tprintf("%s: ambiguous (defined in %s)", symbol, strings.join(g_index.imported_enum_conflicts[type_name][:], ", "))
         }
-        if d, found := g_index.own_structs[type_name];          found { return format_struct(type_name, d) }
-        if d, found := g_index.own_enums[type_name];            found { return format_enum(type_name, d)   }
-        if d, found := g_index.all_imported_structs[type_name]; found { return format_struct(type_name, d) }
-        if d, found := g_index.all_imported_enums[type_name];   found { return format_enum(type_name, d)   }
+        if s := hover_for_type(type_name); s != "" { return s }
         return fmt.tprintf("%s: %s", symbol, type_name)
     }
 
@@ -1022,10 +1020,7 @@ hover_info :: proc(symbol: string) -> string {
         for field in defn.fields {
             if field.name != symbol { continue }
             t := field.type
-            if d, found := g_index.own_structs[t];          found { return format_struct(t, d) }
-            if d, found := g_index.own_enums[t];            found { return format_enum(t, d)   }
-            if d, found := g_index.all_imported_structs[t]; found { return format_struct(t, d) }
-            if d, found := g_index.all_imported_enums[t];   found { return format_enum(t, d)   }
+            if s := hover_for_type(t); s != "" { return s }
             return fmt.tprintf("%s: %s", symbol, t)
         }
     }
@@ -1102,7 +1097,7 @@ completions_unqualified :: proc(prefix: string) -> string {
     return strings.trim_right(strings.to_string(sb), "\n")
 }
 
-completions_for_type :: proc(type_name: string, prefix: string, buffer: string) -> string {
+completions_for_type :: proc(type_name: string, prefix: string, local_ctx: string) -> string {
     write_struct_fields :: proc(sb: ^strings.Builder, defn: Struct_Definition, prefix: string) {
         for f in defn.fields {
             if strings.has_prefix(f.name, prefix) { strings.write_string(sb, f.name); strings.write_byte(sb, '\t'); strings.write_string(sb, f.type); strings.write_byte(sb, '\n') }
@@ -1153,9 +1148,19 @@ fd_write_all :: proc(fd: posix.FD, buf: []u8) -> bool {
     return true
 }
 
+// Write header + body as a single syscall for responses that fit in a stack buffer.
+// Ceiling: responses over 4 KB fall back to two writes — fine, completions are rarely huge.
+INLINE_FRAME_CAP :: 4096
+
 write_frame :: proc(fd: posix.FD, msg: string) -> bool {
     body := transmute([]u8)msg
     n    := len(body)
+    if n + 8 <= INLINE_FRAME_CAP {
+        buf: [INLINE_FRAME_CAP]u8
+        fmt.bprintf(buf[:8], "%08x", n)
+        copy(buf[8:], body)
+        return fd_write_all(fd, buf[:8 + n])
+    }
     hdr_str := fmt.tprintf("%08x", n)
     hdr  := transmute([]u8)hdr_str
     return fd_write_all(fd, hdr) && fd_write_all(fd, body)
@@ -1260,19 +1265,21 @@ handle_client :: proc(client_fd: posix.FD) {
 
         switch cmd {
         case "comp":
-            buf, buf_ok := read_frame(client_fd, context.temp_allocator)
-            if !buf_ok { return }
-            
+            // Three frames: prefix, dot_chain (empty if unqualified), local_ctx (N lines before cursor).
+            prefix,    p_ok := read_frame(client_fd, context.temp_allocator); if !p_ok { return }
+            dot_chain, d_ok := read_frame(client_fd, context.temp_allocator); if !d_ok { return }
+            local_ctx, l_ok := read_frame(client_fd, context.temp_allocator); if !l_ok { return }
+
             context.allocator = context.temp_allocator
-            result := completions_for_buffer(buf)
+            result := completions_for_request(prefix, dot_chain, local_ctx)
             write_frame(client_fd, result)
 
         case "hover":
-            sym, sym_ok := read_frame(client_fd, context.temp_allocator)
-            if !sym_ok { return }
-            
+            sym,       sym_ok := read_frame(client_fd, context.temp_allocator); if !sym_ok { return }
+            local_ctx, ctx_ok := read_frame(client_fd, context.temp_allocator); if !ctx_ok { return }
+
             context.allocator = context.temp_allocator
-            result := hover_info(sym)
+            result := hover_info(sym, local_ctx)
             write_frame(client_fd, result)
 
         case "goto":
@@ -1305,7 +1312,7 @@ handle_client :: proc(client_fd: posix.FD) {
 main :: proc() {
     daemon_mode := false
     filepath := ""
-    
+
     for i := 1; i < len(os.args); i += 1 {
         arg := os.args[i]
         if arg == "--daemon" {

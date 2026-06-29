@@ -1,8 +1,16 @@
+## 13
+
+### Fixed
+
+- Improved performance on hover and autocomplete
+- Hover and autocomplete work for local variables and proc parameters
+
 ## 12
 
 ### Changed
 
-Faster startup and lower memory usage
+- Faster startup
+- Lower memory usage
 
 ## 11
 
@@ -20,7 +28,7 @@ Faster startup and lower memory usage
 
 - Better memory management
 - Resolve name conflicts between imported packages
-- Lexer don't hang on broken block comment
+- Lexer don't hang on broken block comments
 
 ## 8
 
@@ -38,14 +46,11 @@ Faster startup and lower memory usage
 ### Added
 
 - Project root detection
+- Clean shutdown
 
 ### Changed
 
 - K toggles hover
-
-### Fixed
-
-- Daemon no longer crashes
 
 ## 6
 
@@ -85,4 +90,4 @@ Faster startup and lower memory usage
 
 ### Added
 
-- Autocomplete for enums and structs that are defined in the current file
+- Autocomplete for enums and structs defined in the current file

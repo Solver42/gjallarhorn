@@ -4,6 +4,9 @@ let g:loaded_gjallarhorn = 1
 let g:gjallarhorn_bin             = get(g:, 'gjallarhorn_bin',             expand('~/.local/bin/gjallarhorn'))
 let g:gjallarhorn_startup_timeout = get(g:, 'gjallarhorn_startup_timeout', 5000)
 let g:gjallarhorn_request_timeout = get(g:, 'gjallarhorn_request_timeout', 3000)
+" Number of lines before cursor sent for local variable type inference.
+" Matches LOCAL_CTX_LINES in the daemon. Raise both together if needed.
+let g:gjallarhorn_ctx_lines       = get(g:, 'gjallarhorn_ctx_lines',       150)
 
 let s:daemons        = {}
 let s:hover_popup_id = v:none
@@ -25,9 +28,7 @@ function! s:find_project_root(dir) abort
 endfunction
 
 function! s:encode_frame(msg) abort
-    let l:n  = len(a:msg)
-    let l:hex = printf('%08x', l:n)
-    return l:hex . a:msg
+    return printf('%08x', len(a:msg)) . a:msg
 endfunction
 
 function! s:channel_read_n(ch, n) abort
@@ -83,7 +84,7 @@ function! s:daemon_channel(filepath) abort
     if !has_key(s:daemons, l:root) | return v:null | endif
     let l:entry = s:daemons[l:root]
     if !has_key(l:entry, 'job') || job_status(l:entry.job) !=# 'run' | return v:null | endif
-    
+
     if !has_key(l:entry, 'channel') || ch_status(l:entry.channel) !=# 'open'
         if has_key(l:entry, 'socket_path')
             let l:ch = ch_open('unix:' . l:entry.socket_path, {
@@ -162,8 +163,32 @@ function! gjallarhorn#index_async(filepath) abort
     if l:ch is v:null | return | endif
     call ch_sendraw(l:ch, s:encode_frame('index'))
     call ch_sendraw(l:ch, s:encode_frame(a:filepath))
-    " drain response without blocking — ch_read with timeout 0
     call ch_read(l:ch, {'timeout': 0})
+endfunction
+
+" Extract the dot-chain and prefix from the current cursor position.
+" Returns [prefix, dot_chain] where dot_chain is '' for unqualified completions.
+function! s:comp_context() abort
+    let l:line   = getline('.')
+    let l:col    = col('.') - 1
+    let l:prefix = matchstr(l:line[:l:col - 1], '\w*$')
+    let l:before = l:line[:l:col - len(l:prefix) - 1]
+
+    " Walk the dot-chain immediately left of the prefix.
+    let l:chain = matchstr(l:before, '[a-zA-Z0-9_.]\+\.$')
+    " Strip the trailing dot.
+    let l:chain = substitute(l:chain, '\.$', '', '')
+
+    return [l:prefix, l:chain]
+endfunction
+
+" Return the last N lines above cursor joined by newline — for local var inference.
+function! s:local_ctx() abort
+    let l:cur  = line('.')
+    let l:from = max([1, l:cur - g:gjallarhorn_ctx_lines])
+    " Include partial current line up to cursor so ':=' on the same line works.
+    let l:lines = getline(l:from, l:cur)
+    return join(l:lines, "\n")
 endfunction
 
 function! gjallarhorn#completefunc(findstart, base) abort
@@ -176,11 +201,9 @@ function! gjallarhorn#completefunc(findstart, base) abort
         return l:col
     endif
 
-    let l:lines_above = join(getline(1, line('.') - 1), "\n")
-    let l:line_prefix = strpart(getline('.'), 0, col('.') - 1)
-    let l:buf_text    = (line('.') > 1 ? l:lines_above . "\n" : '') . l:line_prefix
-
-    let l:raw = s:request(expand('%:p'), ['comp', l:buf_text])
+    let [l:prefix, l:chain] = s:comp_context()
+    let l:ctx               = s:local_ctx()
+    let l:raw = s:request(expand('%:p'), ['comp', l:prefix, l:chain, l:ctx])
     if l:raw ==# '' | return [] | endif
 
     let l:candidates = []
@@ -203,8 +226,10 @@ function! gjallarhorn#toggle_hover() abort
 
     let l:word = expand('<cword>')
     if empty(l:word) | return | endif
+    let l:line_to_cursor = strpart(getline('.'), 0, col('.') - 1)
+    if (len(substitute(l:line_to_cursor, '[^\"]', '', 'g')) % 2) == 1 | return | endif
 
-    let l:response = s:request(expand('%:p'), ['hover', l:word])
+    let l:response = s:request(expand('%:p'), ['hover', l:word, s:local_ctx()])
     if l:response =~# '^\s*$' | return | endif
 
     let l:lines = split(trim(l:response), '\n')
