@@ -107,8 +107,8 @@ lexer_skip_whitespace_and_comments :: proc(l: ^Lexer) {
     for l.pos < len(l.src) {
         c := l.src[l.pos]
         // Hot path: most bytes are spaces/newlines — avoid advance_pos call overhead.
-        if c == ' ' || c == '\t' || c == '\r' { l.pos += 1; l.col += 1; continue }
-        if c == '\n'                           { l.pos += 1; l.line += 1; l.col = 1; continue }
+        if c == ' ' || c == '\t' || c == '\r' { l.pos += 1; l.col  += 1; continue }
+        if c == '\n'                          { l.pos += 1; l.line += 1; l.col = 1; continue }
 
         if c == '/' && l.pos + 1 < len(l.src) {
             if l.src[l.pos + 1] == '/' {
@@ -177,13 +177,13 @@ lexer_next :: proc(l: ^Lexer) -> Token {
 }
 
 lexer_peek :: proc(l: ^Lexer) -> Token {
-    saved     := l.pos
+    saved      := l.pos
     saved_line := l.line
     saved_col  := l.col
-    tok       := lexer_next(l)
-    l.pos      = saved
-    l.line     = saved_line
-    l.col      = saved_col
+    tok        := lexer_next(l)
+    l.pos       = saved
+    l.line      = saved_line
+    l.col       = saved_col
     return tok
 }
 

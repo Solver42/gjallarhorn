@@ -201,9 +201,9 @@ function! gjallarhorn#completefunc(findstart, base) abort
         return l:col
     endif
 
-    let [l:prefix, l:chain] = s:comp_context()
-    let l:ctx               = s:local_ctx()
-    let l:raw = s:request(expand('%:p'), ['comp', l:prefix, l:chain, l:ctx])
+    let [l:_prefix, l:chain] = s:comp_context()
+    let l:ctx                = s:local_ctx()
+    let l:raw = s:request(expand('%:p'), ['comp', a:base, l:chain, l:ctx])
     if l:raw ==# '' | return [] | endif
 
     let l:candidates = []

@@ -5,8 +5,7 @@ Author: solver42
 ============================================================================
 COMPLETION                              *gjallarhorn-completion*
 
-Type a name followed by a dot, then Ctrl+X Ctrl+U to get completions
-for that name's fields or values. Use Ctrl+N / Ctrl+P to navigate.
+Type Ctrl+X Ctrl+U to get completions. Use Ctrl+N / Ctrl+P to navigate.
 
 Completions for:
 - Struct fields, enum values, type aliases

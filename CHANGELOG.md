@@ -1,3 +1,9 @@
+## 14
+
+### Fixed
+
+- Autocomplete filter on what you've already entered
+
 ## 13
 
 ### Fixed
@@ -7,7 +13,7 @@
 
 ## 12
 
-### Changed
+### Fixed
 
 - Faster startup
 - Lower memory usage
@@ -28,7 +34,7 @@
 
 - Better memory management
 - Resolve name conflicts between imported packages
-- Lexer don't hang on broken block comments
+- Lexer doesn't hang on broken block comments
 
 ## 8
 
