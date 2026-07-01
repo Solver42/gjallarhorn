@@ -35,7 +35,12 @@ let g:gjallarhorn_bin = '~/.local/bin/gjallarhorn'
 
 Defaults to ~/.local/bin/gjallarhorn.
 
-Additional timeout settings:
+Set |g:gjallarhorn_root_markers| to customize which files or directories
+mark a project root:
+
+let g:gjallarhorn_root_markers = ['.git', 'main.odin']
+
+Timeout settings:
 
 let g:gjallarhorn_startup_timeout = 5000
 let g:gjallarhorn_request_timeout = 3000

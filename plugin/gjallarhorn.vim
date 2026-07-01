@@ -6,17 +6,17 @@ let g:gjallarhorn_startup_timeout = get(g:, 'gjallarhorn_startup_timeout', 5000)
 let g:gjallarhorn_request_timeout = get(g:, 'gjallarhorn_request_timeout', 3000)
 " Number of lines before cursor sent for local variable type inference.
 " Matches LOCAL_CTX_LINES in the daemon. Raise both together if needed.
-let g:gjallarhorn_ctx_lines       = get(g:, 'gjallarhorn_ctx_lines',       150)
+let g:gjallarhorn_ctx_lines    = get(g:, 'gjallarhorn_ctx_lines',       150)
+let g:gjallarhorn_root_markers = get(g:, 'gjallarhorn_root_markers', ['.git', '.editorconfig', 'gjallar.horn'])
 
 let s:daemons        = {}
 let s:hover_popup_id = v:none
-let s:root_markers   = ['.git', '.editorconfig', 'gjallar.horn']
 let s:buffers        = {}
 
 function! s:find_project_root(dir) abort
     let l:cur = a:dir
     while 1
-        for l:m in s:root_markers
+        for l:m in g:gjallarhorn_root_markers
             if filereadable(l:cur . '/' . l:m) || isdirectory(l:cur . '/' . l:m)
                 return l:cur
             endif
@@ -119,7 +119,7 @@ function! gjallarhorn#ensure_daemon(filepath) abort
     let s:daemons[l:root] = {}
 
     let l:job = job_start(
-        \ [g:gjallarhorn_bin, '--daemon', a:filepath],
+        \ [g:gjallarhorn_bin, '--daemon', a:filepath] + g:gjallarhorn_root_markers,
         \ {
         \   'err_cb':     function('s:on_daemon_stderr', [l:root]),
         \   'stoponexit': 'term',

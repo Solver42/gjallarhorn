@@ -15,7 +15,7 @@ indent_spaces : string = "    "
 g_project_root  : string
 g_socket_path_c : cstring
 
-project_root_markers        : = [3]string{".git", ".editorconfig", "gjallar.horn"}
+project_root_markers        : []string
 dirs_excluded_from_indexing :: []string{"vendor"}
 
 Struct_Field :: struct {
@@ -933,8 +933,10 @@ resolve_local_var_type :: proc(local_ctx: string, var_name: string) -> (string, 
         if !found_rest { continue }
 
         if len(rest) > 0 && rest[0] == ':' && (len(rest) == 1 || rest[1] != '=') {
-            after := strings.trim_left(rest[1:], " \t")
-            if end := scan_dotted_ident(after, is_ident); end > 0 { return after[:end], true }
+            after      := strings.trim_left(rest[1:], " \t")
+            ptr_offset := 0
+            if strings.has_prefix(after, "^") { ptr_offset = 1 } // pointer sigil isn't an ident char, skip it before scanning
+            if end := scan_dotted_ident(after[ptr_offset:], is_ident); end > 0 { return after[:ptr_offset + end], true }
         }
 
         if strings.has_prefix(rest, ":=") {
@@ -972,14 +974,15 @@ format_enum :: proc(name: string, defn: Enum_Definition) -> string {
 }
 
 hover_for_type :: proc(type_name: string) -> string {
-    if d, found := g_index.own_structs[type_name];          found { return format_struct(type_name, d) }
-    if d, found := g_index.own_enums[type_name];            found { return format_enum(type_name, d)   }
-    if d, found := g_index.all_imported_structs[type_name]; found { return format_struct(type_name, d) }
-    if d, found := g_index.all_imported_enums[type_name];   found { return format_enum(type_name, d)   }
-    if alias, name, has_dot := split_at_dot(type_name); has_dot {
+    lookup := strings.trim_prefix(type_name, "^") // "^Foo" indexes as "Foo"; type_name keeps the ^ for display
+    if d, found := g_index.own_structs[lookup];          found { return format_struct(type_name, d) }
+    if d, found := g_index.own_enums[lookup];            found { return format_enum(type_name, d)   }
+    if d, found := g_index.all_imported_structs[lookup]; found { return format_struct(type_name, d) }
+    if d, found := g_index.all_imported_enums[lookup];   found { return format_enum(type_name, d)   }
+    if alias, name, has_dot := split_at_dot(lookup); has_dot {
         if pkg := package_by_alias(alias); pkg != nil {
-            if d, found := pkg.structs[name]; found { return format_struct(name, d) }
-            if d, found := pkg.enums[name];   found { return format_enum(name, d)   }
+            if d, found := pkg.structs[name]; found { return format_struct(type_name, d) }
+            if d, found := pkg.enums[name];   found { return format_enum(type_name, d)   }
         }
     }
     return ""
@@ -1321,13 +1324,16 @@ main :: proc() {
                 filepath = os.args[i+1]
                 i += 1
             }
+            project_root_markers = os.args[i+1:]
         }
     }
 
     if !daemon_mode || filepath == "" {
-        fmt.eprintfln("usage: gjallarhorn --daemon <absolute_filepath>")
+        fmt.eprintfln("usage: gjallarhorn --daemon <absolute_filepath> [root_marker ...]")
         os.exit(1)
     }
 
     daemon_start(filepath)
+    daemon_mode = false
+    filepath = ""
 }

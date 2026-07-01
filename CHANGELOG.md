@@ -1,3 +1,9 @@
+## 15
+
+### Added
+
+- Hover on pointers
+
 ## 14
 
 ### Fixed

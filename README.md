@@ -1,6 +1,6 @@
 # Gjallarhorn
 
-A lightweight Vim plugin that provides autocomplete, hover definitions, and go to definition for the Odin language<br>
+A lightweight Vim plugin that provides autocomplete, hover definitions, and go to definition for Odin language.
 
 ## Requirements
 
@@ -28,17 +28,20 @@ cd ~/.vim/pack/plugins/start/gjallarhorn && git pull && sh install.sh
 
 ## Usage
 
-Press `Ctrl+X Ctrl+U` for autocomplete, then use `Ctrl+N` / `Ctrl+P` to cycle<br>
-Completions appear for struct fields, enum values, type aliases, imported library symbols, and chained member access (`a.b.c.`)<br>
-Press `K` on any symbol to view its definition in a popup window<br>
-Press `gd` on any symbol to jump to its definition<br>
+Press `Ctrl+X Ctrl+U` for autocomplete, then use `Ctrl+N` / `Ctrl+P` to cycle.
+Completions appear for struct fields, enum values, type aliases, imported library symbols, and chained member access (`a.b.c.`).
+Press `K` on any symbol to view its definition in a popup window.
+Press `gd` on any symbol to jump to its definition.
 
-## OLS vs Gjallarhorn
+## How Gjallarhorn differs from OLS
 
-Why use Gjallarhorn when [OLS](https://github.com/DanielGavin/ols) gives you rename, code actions, diagnostics, refactoring, higher accuracy, and works in most editors?<br>
-**Speed** Binary frames over a Unix socket, no JSON, protocol overhead or abstractions, a custom lexer tuned for completion and definition, not a full AST<br>
-**Noise** You're writing code, not satisfying an editor, Gjallarhorn provides navigation and completion, the compiler handles diagnostics<br>
-**Setup** No vim-lsp, asyncomplete-lsp and configuration needed, just run `install.sh` and you're done<br>
+Gjallarhorn is a minimalistic Odin editing and navigation tool that stays out of your way until you need it. If you want an IDE experience with rename, refactoring, diagnostics, code actions, and LSP support across many editors, OLS is the right choice.
+
+Why use Gjallarhorn then?
+
+- **Speed** A hand-written lexer over a binary Unix socket protocol. Purpose-built for completion and definitions with no AST or JSON overhead.
+- **Focus** No diagnostics, no squiggly underlines, no editor trying to fix your code while you're still writing it. The compiler is the source of truth.
+- **Simplicity** Run the install script, open vim, edit code. No dependencies, no package manager.
 
 ## How it works
 
@@ -56,15 +59,15 @@ If you want the binary in a custom path, set `g:gjallarhorn_bin` in your `.vimrc
 let g:gjallarhorn_bin = expand('~/.local/bin/gjallarhorn')
 ```
 
-To add more root markers (e.g. `main.odin`), edit both `project_root_markers` in `main.odin` and `s:root_markers` in `plugin/gjallarhorn.vim`, then rebuild:
+To change which files/directories mark a project root, set `g:gjallarhorn_root_markers`
+in your `.vimrc`:
 
-```odin
-project_root_markers := [4]string{".git", ".editorconfig", "gjallar.horn", "main.odin"}
+```vim
+let g:gjallarhorn_root_markers = ['.git', '.editorconfig', 'gjallar.horn', 'main.odin']
 ```
 
-```vimscript
-let s:root_markers = ['.git', '.editorconfig', 'gjallar.horn', 'main.odin']
-```
+This lives in your vimrc, not the plugin, so it survives `git pull` and doesn't
+require rebuilding the binary.
 
 ```sh
 sh ~/.vim/pack/plugins/start/gjallarhorn/install.sh
