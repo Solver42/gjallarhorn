@@ -39,9 +39,9 @@ Gjallarhorn is a minimalistic Odin editing and navigation tool that stays out of
 
 Why use Gjallarhorn then?
 
-- **Speed** A hand-written lexer over a binary Unix socket protocol. Purpose-built for completion and definitions with no AST or JSON overhead.
-- **Focus** No diagnostics, no squiggly underlines, no editor trying to fix your code while you're still writing it. The compiler is the source of truth.
-- **Simplicity** Run the install script, open vim, edit code. No dependencies, no package manager.
+- **Speed** - A hand-written lexer over a binary Unix socket protocol. Purpose-built for completion and definitions with no AST or JSON overhead.
+- **Focus** - No diagnostics, no squiggly underlines, no editor trying to fix your code while you're still writing it. The compiler is the source of truth.
+- **Simplicity** - Run the install script, open vim, edit code. No dependencies, no package manager.
 
 ## How it works
 
@@ -64,13 +64,6 @@ in your `.vimrc`:
 
 ```vim
 let g:gjallarhorn_root_markers = ['.git', '.editorconfig', 'gjallar.horn', 'main.odin']
-```
-
-This lives in your vimrc, not the plugin, so it survives `git pull` and doesn't
-require rebuilding the binary.
-
-```sh
-sh ~/.vim/pack/plugins/start/gjallarhorn/install.sh
 ```
 
 ## License

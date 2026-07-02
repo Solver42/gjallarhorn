@@ -101,6 +101,12 @@ function! s:daemon_channel(filepath) abort
     return l:entry.channel
 endfunction
 
+function! s:warn_if_daemon_not_started(root, timer_id) abort
+    if has_key(s:daemons, a:root) && !has_key(s:daemons[a:root], 'channel')
+        echom 'gjallarhorn: daemon channel did not open'
+    endif
+endfunction
+
 function! gjallarhorn#ensure_daemon(filepath) abort
     if !executable(g:gjallarhorn_bin)
         echom 'gjallarhorn: binary not found at ' . g:gjallarhorn_bin
@@ -132,17 +138,9 @@ function! gjallarhorn#ensure_daemon(filepath) abort
     endif
 
     let s:daemons[l:root].job = l:job
-
-    let l:waited = 0
-    while !has_key(s:daemons[l:root], 'channel') && l:waited < g:gjallarhorn_startup_timeout
-        sleep 50m
-        let l:waited += 50
-        if job_status(l:job) !=# 'run' | break | endif
-    endwhile
-
-    if !has_key(s:daemons[l:root], 'channel')
-        echom 'gjallarhorn: daemon channel did not open'
-    endif
+    " Daemon builds its index and opens the socket in the background (s:on_daemon_stderr
+    " picks it up); don't block the UI waiting for it. Just warn if it never shows up.
+    call timer_start(g:gjallarhorn_startup_timeout, function('s:warn_if_daemon_not_started', [l:root]))
 endfunction
 
 function! s:request(filepath, frames) abort
@@ -152,10 +150,6 @@ function! s:request(filepath, frames) abort
         call ch_sendraw(l:ch, s:encode_frame(l:frame))
     endfor
     return s:read_frame(l:ch)
-endfunction
-
-function! gjallarhorn#index_sync(filepath) abort
-    call s:request(a:filepath, ['index', a:filepath])
 endfunction
 
 function! gjallarhorn#index_async(filepath) abort
@@ -257,7 +251,7 @@ function! gjallarhorn#goto_definition() abort
     endif
     let l:parts = split(l:resp, "\x00")
     if len(l:parts) < 3 | return | endif
-    execute 'edit' fnameescape(l:parts[0])
+    execute 'hide edit' fnameescape(l:parts[0])
     call cursor(l:parts[1], l:parts[2])
 endfunction
 
@@ -266,7 +260,7 @@ augroup gjallarhorn
     autocmd BufReadPost,BufNewFile *.odin
         \ call gjallarhorn#ensure_daemon(expand('<afile>:p'))|
         \ setlocal completefunc=gjallarhorn#completefunc|
-        \ call gjallarhorn#index_sync(expand('<afile>:p'))|
+        \ call gjallarhorn#index_async(expand('<afile>:p'))|
         \ nnoremap <buffer> <silent> K :call gjallarhorn#toggle_hover()<CR>|
         \ nnoremap <buffer> <silent> gd :call gjallarhorn#goto_definition()<CR>
 

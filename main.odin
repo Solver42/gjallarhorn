@@ -93,7 +93,9 @@ make_project_index :: proc() -> Project_Index {
 Token_Kind :: enum { EOF, Identifier, String_Literal, Double_Colon, Open_Brace, Close_Brace, Comma, Colon, Other }
 
 Token :: struct { kind: Token_Kind, text: string, line: int, col: int }
-Lexer :: struct { src:  string,     pos:  int,    line: int, col: int }
+
+Lexer_Mode :: enum { Normal, In_String, In_Block_Comment }
+Lexer :: struct { src: string, pos: int, line: int, col: int, mode: Lexer_Mode }
 
 lexer_make :: proc(src: string) -> Lexer { return {src = src, line = 1, col = 1} }
 
@@ -104,8 +106,24 @@ advance_pos :: proc(l: ^Lexer) {
 }
 
 lexer_skip_whitespace_and_comments :: proc(l: ^Lexer) {
+    block_comment_depth := 0
     for l.pos < len(l.src) {
         c := l.src[l.pos]
+
+        if l.mode == .In_Block_Comment {
+            if c == '*' && l.pos + 1 < len(l.src) && l.src[l.pos + 1] == '/' {
+                l.pos += 2; l.col += 2
+                block_comment_depth -= 1
+                if block_comment_depth == 0 { l.mode = .Normal }
+                continue
+            }
+            if c == '/' && l.pos + 1 < len(l.src) && l.src[l.pos + 1] == '*' {
+                l.pos += 2; l.col += 2; block_comment_depth += 1; continue
+            }
+            if c == '\n' { l.pos += 1; l.line += 1; l.col = 1 } else { l.pos += 1; l.col += 1 }
+            continue
+        }
+
         // Hot path: most bytes are spaces/newlines — avoid advance_pos call overhead.
         if c == ' ' || c == '\t' || c == '\r' { l.pos += 1; l.col  += 1; continue }
         if c == '\n'                          { l.pos += 1; l.line += 1; l.col = 1; continue }
@@ -117,10 +135,8 @@ lexer_skip_whitespace_and_comments :: proc(l: ^Lexer) {
             }
             if l.src[l.pos + 1] == '*' {
                 l.pos += 2; l.col += 2
-                for l.pos + 1 < len(l.src) {
-                    if l.src[l.pos] == '*' && l.src[l.pos + 1] == '/' { l.pos += 2; l.col += 2; break }
-                    if l.src[l.pos] == '\n' { l.pos += 1; l.line += 1; l.col = 1 } else { l.pos += 1; l.col += 1 }
-                }
+                l.mode = .In_Block_Comment
+                block_comment_depth = 1
                 continue
             }
         }
@@ -129,7 +145,7 @@ lexer_skip_whitespace_and_comments :: proc(l: ^Lexer) {
 }
 
 lexer_next :: proc(l: ^Lexer) -> Token {
-    lexer_skip_whitespace_and_comments(l)
+    if l.mode == .Normal { lexer_skip_whitespace_and_comments(l) }
     if l.pos >= len(l.src) { return {kind = .EOF} }
 
     start_line := l.line
@@ -155,6 +171,7 @@ lexer_next :: proc(l: ^Lexer) -> Token {
 
     if c == '"' {
         advance_pos(l)
+        l.mode = .In_String
         start := l.pos
         for l.pos < len(l.src) && l.src[l.pos] != '"' {
             if l.src[l.pos] == '\\' { l.pos += 1; l.col += 1 }
@@ -162,6 +179,7 @@ lexer_next :: proc(l: ^Lexer) -> Token {
         }
         text := l.src[start:l.pos]
         if l.pos < len(l.src) { advance_pos(l) }
+        l.mode = .Normal
         return {kind = .String_Literal, text = text, line = start_line, col = start_col}
     }
 
@@ -180,10 +198,12 @@ lexer_peek :: proc(l: ^Lexer) -> Token {
     saved      := l.pos
     saved_line := l.line
     saved_col  := l.col
+    saved_mode := l.mode
     tok        := lexer_next(l)
     l.pos       = saved
     l.line      = saved_line
     l.col       = saved_col
+    l.mode      = saved_mode
     return tok
 }
 
@@ -292,10 +312,18 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
 
         if next.kind == .Colon {
             lexer_next(&l)
+            ptr_sigil := ""
             type_tok := lexer_peek(&l)
+            if type_tok.kind == .Other && type_tok.text == "^" {
+                lexer_next(&l)
+                ptr_sigil = "^"
+                type_tok = lexer_peek(&l)
+            }
             if type_tok.kind == .Identifier {
                 lexer_next(&l)
-                idx.own_variables[strings.clone(name)] = parse_dotted_type_name(&l, type_tok.text)
+                type_str := parse_dotted_type_name(&l, type_tok.text)
+                if ptr_sigil != "" { type_str = strings.concatenate({ptr_sigil, type_str}) }
+                idx.own_variables[strings.clone(name)] = type_str
             }
         }
     }
@@ -864,12 +892,13 @@ completions_for_request :: proc(prefix: string, dot_chain: string, local_ctx: st
         field_name := segments[i]
         if field_name == "" { return "" }
 
-        struct_defn, found := g_index.own_structs[current_type]
+        lookup_type := strings.trim_prefix(current_type, "^") // pointers deref transparently, same as hover_for_type
+        struct_defn, found := g_index.own_structs[lookup_type]
         if !found {
-            if alias, name, has_dot := split_at_dot(current_type); has_dot {
+            if alias, name, has_dot := split_at_dot(lookup_type); has_dot {
                 if pkg := package_by_alias(alias); pkg != nil { struct_defn, found = pkg.structs[name] }
             }
-            if !found { struct_defn, found = g_index.all_imported_structs[current_type] }
+            if !found { struct_defn, found = g_index.all_imported_structs[lookup_type] }
             if !found { return "" }
         }
 
@@ -1112,7 +1141,9 @@ completions_for_type :: proc(type_name: string, prefix: string, local_ctx: strin
         }
     }
 
-    if alias, name, has_dot := split_at_dot(type_name); has_dot {
+    lookup := strings.trim_prefix(type_name, "^") // pointers deref transparently, same as hover_for_type
+
+    if alias, name, has_dot := split_at_dot(lookup); has_dot {
         if pkg := package_by_alias(alias); pkg != nil {
             sb := strings.builder_make()
             if d, ok := pkg.structs[name]; ok { write_struct_fields(&sb, d, prefix) } else
@@ -1122,10 +1153,10 @@ completions_for_type :: proc(type_name: string, prefix: string, local_ctx: strin
     }
 
     sb := strings.builder_make()
-    if d, ok := g_index.own_structs[type_name];          ok { write_struct_fields(&sb, d, prefix)            } else
-    if d, ok := g_index.own_enums[type_name];            ok { write_enum_values(&sb, d, prefix, type_name)   } else
-    if d, ok := g_index.all_imported_structs[type_name]; ok { write_struct_fields(&sb, d, prefix)            } else
-    if d, ok := g_index.all_imported_enums[type_name];   ok { write_enum_values(&sb, d, prefix, type_name)   }
+    if d, ok := g_index.own_structs[lookup];          ok { write_struct_fields(&sb, d, prefix)            } else
+    if d, ok := g_index.own_enums[lookup];            ok { write_enum_values(&sb, d, prefix, type_name)   } else
+    if d, ok := g_index.all_imported_structs[lookup]; ok { write_struct_fields(&sb, d, prefix)            } else
+    if d, ok := g_index.all_imported_enums[lookup];   ok { write_enum_values(&sb, d, prefix, type_name)   }
     return strings.trim_right(strings.to_string(sb), "\n")
 }
 

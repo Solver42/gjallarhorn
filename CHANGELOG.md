@@ -1,3 +1,13 @@
+## 16
+
+### Added
+
+- Autocomplete on pointers
+
+### Fixed
+
+- Start faster
+
 ## 15
 
 ### Added
@@ -31,6 +41,8 @@
 - Go to definition
 
 ## 10
+
+### Fixed
 
 - Only re-indexes files that actually changed
 
