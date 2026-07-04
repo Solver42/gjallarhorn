@@ -1,3 +1,15 @@
+## 17
+
+### Added
+
+- Go to definition procedures
+- Hover on procedures
+- Autocomplete on procedures
+
+### Fixed
+
+- Don't leak memory on index rebuild
+
 ## 16
 
 ### Added

@@ -8,6 +8,7 @@ import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
 import "core:mem"
+import "core:mem/virtual"
 import "core:unicode/utf8"
 
 indent_spaces : string = "    "
@@ -33,6 +34,12 @@ Enum_Definition :: struct {
     location: Symbol_Ref,
 }
 
+Proc_Definition :: struct {
+    params : [dynamic]string,
+    returns: [dynamic]string,
+    location: Symbol_Ref,
+}
+
 Symbol_Ref :: struct {
     file: string,
     line: int,
@@ -42,14 +49,17 @@ Symbol_Ref :: struct {
 Package_Symbols :: struct {
     structs : map[string]Struct_Definition,
     enums   : map[string]Enum_Definition,
+    procs   : map[string]Proc_Definition,
 }
 
 g_package_cache  : map[string]Package_Symbols
+g_package_arena  : virtual.Arena
 g_odin_root      : string
 
 Project_Index :: struct {
     own_structs              : map[string]Struct_Definition,
     own_enums                : map[string]Enum_Definition,
+    own_procs                : map[string]Proc_Definition,
     own_variables            : map[string]string,
     import_aliases           : map[string]string,
     imported_package_dirs    : map[string]string,
@@ -69,15 +79,43 @@ g_file_hash_cache : map[string]string
 File_Symbol_Names :: struct {
     struct_names     : [dynamic]string,
     enum_names       : [dynamic]string,
+    proc_names       : [dynamic]string,
     variable_names   : [dynamic]string,
     import_aliases   : [dynamic]string,
 }
 g_file_symbols : map[string]File_Symbol_Names
 
+// One arena per project file, holding that file's own_structs/own_enums/own_variables/
+// import_aliases string and slice data. Resetting it on reindex is a single bump-pointer
+// wipe instead of walking and freeing every clone by hand, and it can't leak across files
+// since parse_source_file never aliases another file's data (only merge_file_into_index
+// copies plain struct values out, by value, into g_index's own maps).
+g_file_arenas : map[string]virtual.Arena
+
+// Ceiling: entries for files deleted from disk are never pruned, so a long session with
+// heavy file churn accumulates reserved-but-idle arenas. Upgrade: diff against
+// visited_dirs in build_index and drop arenas for paths no longer present.
+arena_reset :: proc(arena: ^virtual.Arena) {
+    if arena.curr_block == nil {
+        if err := virtual.arena_init_growing(arena); err != nil {
+            fmt.eprintfln("gjallarhorn: arena init failed: %v", err)
+        }
+        return
+    }
+    virtual.arena_free_all(arena)
+}
+
+file_arena :: proc(path: string) -> ^virtual.Arena {
+    if arena, ok := &g_file_arenas[path]; ok { return arena }
+    g_file_arenas[path] = virtual.Arena{}
+    return &g_file_arenas[path]
+}
+
 make_project_index :: proc() -> Project_Index {
     return Project_Index{
         own_structs              = make(map[string]Struct_Definition),
         own_enums                = make(map[string]Enum_Definition),
+        own_procs                = make(map[string]Proc_Definition),
         own_variables            = make(map[string]string),
         import_aliases           = make(map[string]string),
         imported_package_dirs    = make(map[string]string),
@@ -303,6 +341,11 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
                 e := parse_enum_body(&l)
                 e.location = loc
                 idx.own_enums[strings.clone(name)] = e
+            case "proc":
+                lexer_next(&l)
+                p := parse_proc_signature(&l)
+                p.location = loc
+                idx.own_procs[strings.clone(name)] = p
             case:
                 lexer_next(&l)
                 idx.own_variables[strings.clone(name)] = parse_dotted_type_name(&l, after.text)
@@ -394,6 +437,121 @@ parse_enum_body :: proc(l: ^Lexer) -> Enum_Definition {
     }
 }
 
+// Looks ahead for a colon before the matching ")", without consuming anything.
+type_list_is_named :: proc(l: ^Lexer) -> bool {
+    saved_pos, saved_line, saved_col, saved_mode := l.pos, l.line, l.col, l.mode
+    defer { l.pos = saved_pos; l.line = saved_line; l.col = saved_col; l.mode = saved_mode }
+
+    depth := 0
+    for {
+        tok := lexer_next(l)
+        if tok.kind == .EOF { return false }
+        if tok.kind == .Colon { return true }
+        if tok.kind == .Other && tok.text == "(" { depth += 1 }
+        if tok.kind == .Other && tok.text == ")" {
+            if depth == 0 { return false }
+            depth -= 1
+        }
+    }
+}
+
+parse_bare_type_list :: proc(l: ^Lexer) -> [dynamic]string {
+    types := make([dynamic]string)
+    for {
+        parts := make([dynamic]string, context.allocator)
+        defer delete(parts)
+        depth := 0
+        for {
+            pk := lexer_peek(l)
+            if pk.kind == .EOF { break }
+            if pk.kind == .Other && pk.text == "(" { depth += 1 }
+            if pk.kind == .Other && pk.text == ")" {
+                if depth == 0 { break }
+                depth -= 1
+            }
+            if depth == 0 && pk.kind == .Comma { break }
+            append(&parts, lexer_next(l).text)
+        }
+        if joined := strings.join(parts[:], ""); joined != "" { append(&types, joined) }
+        if lexer_peek(l).kind == .Comma { lexer_next(l); continue }
+        return types
+    }
+}
+
+// Collects one type per name-group between "(" and ")", e.g. "a, b: int, c: string"
+// yields ["int", "string"]. Mirrors parse_struct_body's field-type scan, so it shares that
+// ceiling: a type with its own unbalanced parens (a proc-typed parameter) parses wrong.
+// A param with no explicit type (`x := default`) contributes nothing, since there's no
+// static type to show.
+//
+// A parenthesized return list can also be unnamed, e.g. "-> (string, bool)". Odin requires
+// a list to be either fully named or fully bare, never mixed, so checking whether any colon
+// appears before the matching ")" tells us which form the whole list is in.
+parse_type_list :: proc(l: ^Lexer) -> [dynamic]string {
+    if !type_list_is_named(l) { return parse_bare_type_list(l) }
+
+    types := make([dynamic]string)
+    for {
+        for {
+            pk := lexer_peek(l)
+            if pk.kind == .EOF { return types }
+            if pk.kind == .Other && pk.text == ")" { return types }
+            if pk.kind == .Colon { break }
+            lexer_next(l)
+        }
+        lexer_next(l) // consume ':'
+
+        parts := make([dynamic]string, context.allocator)
+        defer delete(parts)
+        for {
+            pk := lexer_peek(l)
+            if pk.kind == .EOF { break }
+            if pk.kind == .Other && (pk.text == ")" || pk.text == "=") { break }
+            if pk.kind == .Comma { break }
+            append(&parts, lexer_next(l).text)
+        }
+        if joined := strings.join(parts[:], ""); joined != "" { append(&types, joined) }
+
+        if lexer_peek(l).kind == .Comma { lexer_next(l) }
+    }
+}
+
+// Parses proc ["conv"](params) -> return for hover text, leaving the lexer positioned
+// right before the body ("{" or "---").
+parse_proc_signature :: proc(l: ^Lexer) -> Proc_Definition {
+    defn := Proc_Definition{params = make([dynamic]string), returns = make([dynamic]string)}
+
+    if lexer_peek(l).kind == .String_Literal { lexer_next(l) }
+    open := lexer_next(l)
+    if open.kind != .Other || open.text != "(" { return defn }
+
+    defn.params = parse_type_list(l)
+    if lexer_peek(l).kind == .Other && lexer_peek(l).text == ")" { lexer_next(l) }
+
+    if lexer_peek(l).kind == .Other && lexer_peek(l).text == "-" {
+        lexer_next(l)
+        if lexer_peek(l).kind == .Other && lexer_peek(l).text == ">" { lexer_next(l) }
+
+        if lexer_peek(l).kind == .Other && lexer_peek(l).text == "(" {
+            lexer_next(l)
+            defn.returns = parse_type_list(l)
+            if lexer_peek(l).kind == .Other && lexer_peek(l).text == ")" { lexer_next(l) }
+        } else {
+            parts := make([dynamic]string, context.allocator)
+            defer delete(parts)
+            for {
+                pk := lexer_peek(l)
+                if pk.kind == .EOF || pk.kind == .Open_Brace { break }
+                if pk.kind == .Other && (pk.text == "-" || pk.text == "#") { break } // "---" body or trailing attribute
+                append(&parts, lexer_next(l).text)
+            }
+            if joined := strings.join(parts[:], ""); joined != "" { append(&defn.returns, joined) }
+        }
+    }
+
+    return defn
+}
+
 get_odin_root :: proc() -> (string, bool) {
     if g_odin_root != "" { return g_odin_root, true }
 
@@ -440,15 +598,23 @@ resolve_import_to_dir :: proc(import_path: string, source_file: string) -> (stri
 load_package_symbols :: proc(package_dir: string) {
     if package_dir in g_package_cache { return }
 
+    outer := context.allocator
+    context.allocator = virtual.arena_allocator(&g_package_arena)
+
     pkg := Package_Symbols{
         structs = make(map[string]Struct_Definition),
         enums   = make(map[string]Enum_Definition),
+        procs   = make(map[string]Proc_Definition),
     }
 
     type_aliases := make(map[string]string)
 
     file_infos, err := os.read_all_directory_by_path(package_dir, context.allocator)
-    if err != nil { g_package_cache[package_dir] = pkg; return }
+    if err != nil {
+        context.allocator = outer
+        g_package_cache[package_dir] = pkg
+        return
+    }
     defer os.file_info_slice_delete(file_infos, context.allocator)
 
     for fi in file_infos {
@@ -469,6 +635,9 @@ load_package_symbols :: proc(package_dir: string) {
         }
         for k, &e in file_idx.own_enums {
             pkg.enums[k] = e
+        }
+        for k, &p in file_idx.own_procs {
+            pkg.procs[k] = p
         }
         for k, v in file_idx.own_variables {
             type_aliases[k] = v
@@ -498,6 +667,7 @@ load_package_symbols :: proc(package_dir: string) {
         }
     }
 
+    context.allocator = outer
     g_package_cache[package_dir] = pkg
 }
 
@@ -558,6 +728,38 @@ dir_should_be_skipped :: proc(name: string) -> bool {
     return false
 }
 
+// Parses one file into its own arena, resetting it first if this is a reindex.
+// Caller merges the returned index into place and owns path's lifetime: path must
+// already be a stable, persistent string, since it becomes a key in g_file_arenas,
+// g_file_symbols and g_file_hash_cache on first use.
+index_one_file :: proc(path: string, src: string) -> Project_Index {
+    arena := file_arena(path)
+    arena_reset(arena)
+
+    outer := context.allocator
+    context.allocator = virtual.arena_allocator(arena)
+
+    file_idx := parse_source_file(path, src)
+
+    syms := File_Symbol_Names{
+        struct_names   = make([dynamic]string),
+        enum_names     = make([dynamic]string),
+        proc_names     = make([dynamic]string),
+        variable_names = make([dynamic]string),
+        import_aliases = make([dynamic]string),
+    }
+    for name in file_idx.own_structs     { append(&syms.struct_names,   strings.clone(name)) }
+    for name in file_idx.own_enums       { append(&syms.enum_names,     strings.clone(name)) }
+    for name in file_idx.own_procs       { append(&syms.proc_names,     strings.clone(name)) }
+    for name in file_idx.own_variables   { append(&syms.variable_names, strings.clone(name)) }
+    for alias in file_idx.import_aliases { append(&syms.import_aliases, strings.clone(alias)) }
+
+    context.allocator = outer
+    g_file_symbols[path] = syms
+
+    return file_idx
+}
+
 index_directory :: proc(idx: ^Project_Index, dir_path: string) -> bool {
     file_infos, err := os.read_all_directory_by_path(dir_path, context.allocator)
     if err != nil { return false }
@@ -573,26 +775,13 @@ index_directory :: proc(idx: ^Project_Index, dir_path: string) -> bool {
         src_data, read_err := os.read_entire_file_from_path(full_path, context.allocator)
         if read_err != nil { delete(full_path, context.allocator); continue }
 
-        file_idx := parse_source_file(full_path, string(src_data))
+        file_idx := index_one_file(full_path, string(src_data))
         merge_file_into_index(idx, &file_idx)
+        g_file_hash_cache[full_path] = md5_hex(src_data)
 
-        hash := md5_hex(src_data)
-        g_file_hash_cache[full_path] = hash
-
-        syms := File_Symbol_Names{
-            struct_names   = make([dynamic]string),
-            enum_names     = make([dynamic]string),
-            variable_names = make([dynamic]string),
-            import_aliases = make([dynamic]string),
-        }
-        for name in file_idx.own_structs   { append(&syms.struct_names,   strings.clone(name)) }
-        for name in file_idx.own_enums     { append(&syms.enum_names,     strings.clone(name)) }
-        for name in file_idx.own_variables { append(&syms.variable_names, strings.clone(name)) }
-        for alias in file_idx.import_aliases { append(&syms.import_aliases, strings.clone(alias)) }
-        g_file_symbols[full_path] = syms
-
+        // full_path is now a key in g_file_arenas/g_file_symbols/g_file_hash_cache — owned
+        // by them for the life of the daemon, not freed here.
         delete(src_data, context.allocator)
-        delete(full_path, context.allocator)
         found = true
     }
 
@@ -637,6 +826,10 @@ merge_file_into_index :: proc(idx: ^Project_Index, file_idx: ^Project_Index) {
         idx.own_enums[k] = e
     }
 
+    for k, v in file_idx.own_procs {
+        idx.own_procs[k] = v
+    }
+
     for k, v in file_idx.own_variables {
         idx.own_variables[k] = v
     }
@@ -657,38 +850,17 @@ path_parent_dir :: proc(file_path: string, allocator := context.allocator) -> st
 }
 
 project_index_destroy :: proc(idx: ^Project_Index) {
-    for k, &v in idx.own_structs {
-        for &f in v.fields {
-            delete(f.name)
-            delete(f.type)
-        }
-        delete(v.location.file)
-        delete(v.fields)
-        delete(k)
-    }
+    // own_structs/own_enums/own_variables/import_aliases hold string and slice data owned
+    // by per-file arenas (see g_file_arenas); all_imported_structs/all_imported_enums alias
+    // g_package_cache's data, owned by g_package_arena. Both get reclaimed when those arenas
+    // reset, not here — only the map headers themselves are heap-allocated and need dropping.
     delete(idx.own_structs)
-
-    for k, &v in idx.own_enums {
-        for s in v.values {
-            delete(s)
-        }
-        delete(v.location.file)
-        delete(v.values)
-        delete(k)
-    }
     delete(idx.own_enums)
-
-    for k, v in idx.own_variables {
-        delete(k)
-        delete(v)
-    }
+    delete(idx.own_procs)
     delete(idx.own_variables)
-
-    for k, v in idx.import_aliases {
-        delete(k)
-        delete(v)
-    }
     delete(idx.import_aliases)
+    delete(idx.all_imported_structs)
+    delete(idx.all_imported_enums)
 
     for k, v in idx.imported_package_dirs {
         delete(k)
@@ -725,40 +897,14 @@ project_index_destroy :: proc(idx: ^Project_Index) {
         delete(k)
     }
     delete(idx.imported_enum_conflicts)
-
-    for k in idx.all_imported_structs {
-        delete(k)
-    }
-    delete(idx.all_imported_structs)
-
-    for k in idx.all_imported_enums {
-        delete(k)
-    }
-    delete(idx.all_imported_enums)
 }
 
-package_cache_destroy :: proc(cache: ^map[string]Package_Symbols) {
-    for k, v in cache^ {
-        for _, sd in v.structs {
-            for f in sd.fields {
-                delete(f.name)
-                delete(f.type)
-            }
-            delete(sd.location.file)
-            delete(sd.fields)
-        }
-        delete(v.structs)
-        for _, ed in v.enums {
-            for s in ed.values {
-                delete(s)
-            }
-            delete(ed.location.file)
-            delete(ed.values)
-        }
-        delete(v.enums)
-        delete(k)
-    }
-    delete(cache^)
+package_cache_destroy :: proc() {
+    // Every string/slice/nested map inside each cached package lives in g_package_arena
+    // (see load_package_symbols) and is reclaimed by the reset below — only g_package_cache's
+    // own heap-backed table needs an explicit free here.
+    delete(g_package_cache)
+    arena_reset(&g_package_arena)
 }
 
 md5_hex :: proc(data: []u8) -> string {
@@ -776,7 +922,7 @@ build_index :: proc(project_root: string, any_project_file: string) {
     g_persistent_allocator = context.allocator
 
     project_index_destroy(&g_index)
-    package_cache_destroy(&g_package_cache)
+    package_cache_destroy()
 
     g_package_cache = make(map[string]Package_Symbols)
 
@@ -808,36 +954,26 @@ rebuild_index :: proc(trigger_file: string) {
         return
     }
 
+    // trigger_file comes from context.temp_allocator (freed on the next request on this
+    // connection), which is fine for updating an already-known key (map assignment only
+    // compares against it, doesn't re-store it) but not for a first-time key insertion —
+    // that physically copies these bytes into the map and must outlive this request.
+    path := trigger_file if was_cached else strings.clone(trigger_file, g_persistent_allocator)
+
     // Remove old symbols contributed by this file
-    if old_syms, ok := g_file_symbols[trigger_file]; ok {
+    if old_syms, ok := g_file_symbols[path]; ok {
         for name in old_syms.struct_names  { delete_key(&g_index.own_structs,   name) }
         for name in old_syms.enum_names    { delete_key(&g_index.own_enums,     name) }
+        for name in old_syms.proc_names    { delete_key(&g_index.own_procs,     name) }
         for name in old_syms.variable_names{ delete_key(&g_index.own_variables, name) }
         for alias in old_syms.import_aliases{ delete_key(&g_index.import_aliases, alias) }
-        delete(old_syms.struct_names)
-        delete(old_syms.enum_names)
-        delete(old_syms.variable_names)
-        delete(old_syms.import_aliases)
-        delete_key(&g_file_symbols, trigger_file)
     }
 
-    file_idx := parse_source_file(trigger_file, string(src_data))
+    file_idx := index_one_file(path, string(src_data))
     merge_file_into_index(&g_index, &file_idx)
 
     if old_hash, had_old := g_file_hash_cache[trigger_file]; had_old { delete(old_hash) }
-    g_file_hash_cache[trigger_file] = hash
-
-    syms := File_Symbol_Names{
-        struct_names   = make([dynamic]string),
-        enum_names     = make([dynamic]string),
-        variable_names = make([dynamic]string),
-        import_aliases = make([dynamic]string),
-    }
-    for name in file_idx.own_structs   { append(&syms.struct_names,   strings.clone(name)) }
-    for name in file_idx.own_enums     { append(&syms.enum_names,     strings.clone(name)) }
-    for name in file_idx.own_variables { append(&syms.variable_names, strings.clone(name)) }
-    for alias in file_idx.import_aliases { append(&syms.import_aliases, strings.clone(alias)) }
-    g_file_symbols[trigger_file] = syms
+    g_file_hash_cache[path] = hash
 
     resolve_and_load_imports(&g_index, trigger_file)
 
@@ -1002,6 +1138,26 @@ format_enum :: proc(name: string, defn: Enum_Definition) -> string {
     return strings.to_string(sb)
 }
 
+format_proc :: proc(name: string, defn: Proc_Definition) -> string {
+    sb := strings.builder_make()
+    strings.write_string(&sb, "proc "); strings.write_string(&sb, name)
+    for p in defn.params {
+        strings.write_byte(&sb, '\n'); strings.write_string(&sb, indent_spaces)
+        strings.write_string(&sb, "<- "); strings.write_string(&sb, p)
+    }
+    for r in defn.returns {
+        strings.write_byte(&sb, '\n'); strings.write_string(&sb, indent_spaces)
+        strings.write_string(&sb, "-> "); strings.write_string(&sb, r)
+    }
+    return strings.to_string(sb)
+}
+
+proc_signature_summary :: proc(defn: Proc_Definition) -> string {
+    params := strings.join(defn.params[:], ", ")
+    if len(defn.returns) == 0 { return fmt.tprintf("(%s)", params) }
+    return fmt.tprintf("(%s) -> %s", params, strings.join(defn.returns[:], ", "))
+}
+
 hover_for_type :: proc(type_name: string) -> string {
     lookup := strings.trim_prefix(type_name, "^") // "^Foo" indexes as "Foo"; type_name keeps the ^ for display
     if d, found := g_index.own_structs[lookup];          found { return format_struct(type_name, d) }
@@ -1020,6 +1176,7 @@ hover_for_type :: proc(type_name: string) -> string {
 hover_info :: proc(symbol: string, local_ctx: string) -> string {
     if d, ok := g_index.own_structs[symbol];          ok { return format_struct(symbol, d) }
     if d, ok := g_index.own_enums[symbol];            ok { return format_enum(symbol, d)   }
+    if d, ok := g_index.own_procs[symbol];            ok { return format_proc(symbol, d)   }
     if symbol in g_index.imported_struct_conflicts {
         return fmt.tprintf("%s: ambiguous (defined in %s)", symbol, strings.join(g_index.imported_struct_conflicts[symbol][:], ", "))
     }
@@ -1062,6 +1219,7 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
 goto_def :: proc(symbol: string) -> (file: string, line: int, col: int, ok: bool) {
     if d, found := g_index.own_structs[symbol];          found { loc := d.location; return loc.file, loc.line, loc.col, true }
     if d, found := g_index.own_enums[symbol];            found { loc := d.location; return loc.file, loc.line, loc.col, true }
+    if d, found := g_index.own_procs[symbol];            found { loc := d.location; return loc.file, loc.line, loc.col, true }
     if symbol in g_index.imported_struct_conflicts                  { return "", 0, 0, false }
     if symbol in g_index.imported_enum_conflicts                    { return "", 0, 0, false }
     if d, found := g_index.all_imported_structs[symbol]; found { loc := d.location; return loc.file, loc.line, loc.col, true }
@@ -1088,6 +1246,9 @@ completions_from_package :: proc(alias: string, prefix: string) -> string {
     for name in pkg.enums {
         if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, alias); strings.write_byte(&sb, '\n') }
     }
+    for name, defn in pkg.procs {
+        if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, proc_signature_summary(defn)); strings.write_byte(&sb, '\n') }
+    }
     return strings.trim_right(strings.to_string(sb), "\n")
 }
 
@@ -1098,6 +1259,9 @@ completions_unqualified :: proc(prefix: string) -> string {
     }
     for name in g_index.own_enums {
         if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_string(&sb, "\t\n") }
+    }
+    for name, defn in g_index.own_procs {
+        if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, proc_signature_summary(defn)); strings.write_byte(&sb, '\n') }
     }
     for name in g_index.all_imported_structs {
         if name in g_index.own_structs { continue }
