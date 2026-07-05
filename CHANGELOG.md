@@ -1,10 +1,16 @@
+## 18
+
+### Fixed
+
+- Go to definition for unsaved buffers 
+
 ## 17
 
 ### Added
 
-- Go to definition procedures
-- Hover on procedures
-- Autocomplete on procedures
+- Go to definition for procedures
+- Hover for procedures
+- Autocomplete for procedures
 
 ### Fixed
 
@@ -14,7 +20,7 @@
 
 ### Added
 
-- Autocomplete on pointers
+- Autocomplete for pointers
 
 ### Fixed
 
@@ -24,7 +30,7 @@
 
 ### Added
 
-- Hover on pointers
+- Hover for pointers
 
 ## 14
 
@@ -36,7 +42,7 @@
 
 ### Fixed
 
-- Improved performance on hover and autocomplete
+- Improved performance for hover and autocomplete
 - Hover and autocomplete work for local variables and proc parameters
 
 ## 12
