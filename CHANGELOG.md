@@ -1,3 +1,13 @@
+## 19
+
+### Added
+
+- Jumplist
+
+### Fixed
+
+- Autocomplete always works
+
 ## 18
 
 ### Fixed

@@ -5,7 +5,6 @@ set hidden
 let g:gjallarhorn_bin             = get(g:, 'gjallarhorn_bin',             expand('~/.local/bin/gjallarhorn'))
 let g:gjallarhorn_startup_timeout = get(g:, 'gjallarhorn_startup_timeout', 5000)
 let g:gjallarhorn_request_timeout = get(g:, 'gjallarhorn_request_timeout', 3000)
-let g:gjallarhorn_ctx_lines       = get(g:, 'gjallarhorn_ctx_lines',       150)
 let g:gjallarhorn_root_markers    = get(g:, 'gjallarhorn_root_markers',    ['.git', '.editorconfig', 'gjallar.horn'])
 
 let s:daemons        = {}
@@ -170,7 +169,16 @@ function! s:comp_context() abort
 endfunction
 
 function! s:local_ctx() abort
-    return join(getline(max([1, line('.') - g:gjallarhorn_ctx_lines]), line('.')), "\n")
+    let l:cur = line('.')
+    let l:start = l:cur
+    while l:start > 1
+        if getline(l:start - 1) =~# '^\S.*::\s*proc\>'
+            let l:start -= 1
+            break
+        endif
+        let l:start -= 1
+    endwhile
+    return join(getline(l:start, l:cur), "\n")
 endfunction
 
 function! gjallarhorn#completefunc(findstart, base) abort
@@ -183,7 +191,10 @@ function! gjallarhorn#completefunc(findstart, base) abort
         return l:col
     endif
     let [l:_prefix, l:chain] = s:comp_context()
-    let l:raw = s:request(expand('%:p'), ['comp', a:base, l:chain, s:local_ctx()])
+    let l:frames = &modified
+        \ ? ['comp_buf', expand('%:p'), a:base, l:chain, join(getline(1, '$'), "\n"), s:local_ctx()]
+        \ : ['comp', a:base, l:chain, s:local_ctx()]
+    let l:raw = s:request(expand('%:p'), l:frames)
     if l:raw ==# '' | return [] | endif
     let l:candidates = []
     for l:line in split(l:raw, "\n")
@@ -235,6 +246,7 @@ function! gjallarhorn#goto_definition() abort
     endif
     let l:parts = split(l:resp, "\x00")
     if len(l:parts) < 3 | return | endif
+    normal! m'
     if resolve(l:parts[0]) !=# resolve(l:fp)
         execute 'hide edit' fnameescape(l:parts[0])
     endif

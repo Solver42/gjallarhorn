@@ -1428,6 +1428,19 @@ handle_client :: proc(client_fd: posix.FD) {
             result := completions_for_request(prefix, dot_chain, local_ctx)
             write_frame(client_fd, result)
 
+        case "comp_buf":
+            path,      path_ok := read_frame(client_fd, context.temp_allocator); if !path_ok { return }
+            prefix,    p_ok := read_frame(client_fd, context.temp_allocator); if !p_ok { return }
+            dot_chain, d_ok := read_frame(client_fd, context.temp_allocator); if !d_ok { return }
+            buf,       b_ok := read_frame(client_fd, context.temp_allocator); if !b_ok { return }
+            local_ctx, l_ok := read_frame(client_fd, context.temp_allocator); if !l_ok { return }
+
+            context.allocator = g_persistent_allocator
+            rebuild_index_from_buf(path, buf)
+            context.allocator = context.temp_allocator
+            result := completions_for_request(prefix, dot_chain, local_ctx)
+            write_frame(client_fd, result)
+
         case "hover":
             sym,       sym_ok := read_frame(client_fd, context.temp_allocator); if !sym_ok { return }
             local_ctx, ctx_ok := read_frame(client_fd, context.temp_allocator); if !ctx_ok { return }
