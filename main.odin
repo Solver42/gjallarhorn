@@ -69,6 +69,7 @@ Project_Index :: struct {
     imported_enum_sources    : map[string]string,
     imported_struct_conflicts: map[string][dynamic]string,
     imported_enum_conflicts  : map[string][dynamic]string,
+    inactive_sources         : map[string]bool,
 }
 
 g_persistent_allocator: mem.Allocator
@@ -82,6 +83,7 @@ File_Symbol_Names :: struct {
     proc_names       : [dynamic]string,
     variable_names   : [dynamic]string,
     import_aliases   : [dynamic]string,
+    import_paths     : [dynamic]string,
 }
 g_file_symbols : map[string]File_Symbol_Names
 
@@ -117,6 +119,7 @@ make_project_index :: proc() -> Project_Index {
         imported_enum_sources    = make(map[string]string),
         imported_struct_conflicts= make(map[string][dynamic]string),
         imported_enum_conflicts  = make(map[string][dynamic]string),
+        inactive_sources         = make(map[string]bool),
     }
 }
 
@@ -771,12 +774,16 @@ index_one_file :: proc(path: string, src: string) -> Project_Index {
         proc_names     = make([dynamic]string),
         variable_names = make([dynamic]string),
         import_aliases = make([dynamic]string),
+        import_paths   = make([dynamic]string),
     }
     for name in file_idx.own_structs     { append(&syms.struct_names,   strings.clone(name)) }
     for name in file_idx.own_enums       { append(&syms.enum_names,     strings.clone(name)) }
     for name in file_idx.own_procs       { append(&syms.proc_names,     strings.clone(name)) }
     for name in file_idx.own_variables   { append(&syms.variable_names, strings.clone(name)) }
-    for alias in file_idx.import_aliases { append(&syms.import_aliases, strings.clone(alias)) }
+    for alias, path_val in file_idx.import_aliases {
+        append(&syms.import_aliases, strings.clone(alias))
+        append(&syms.import_paths, strings.clone(path_val))
+    }
 
     context.allocator = outer
     g_file_symbols[path] = syms
@@ -959,11 +966,32 @@ reindex_from_content :: proc(path: string, was_cached: bool, src: []u8) {
         for name in old_syms.enum_names     { delete_key(&g_index.own_enums,     name) }
         for name in old_syms.proc_names     { delete_key(&g_index.own_procs,     name) }
         for name in old_syms.variable_names { delete_key(&g_index.own_variables, name) }
-        for alias in old_syms.import_aliases{ delete_key(&g_index.import_aliases, alias) }
     }
 
     file_idx := index_one_file(p, string(src))
     merge_file_into_index(&g_index, &file_idx)
+
+    clear(&g_index.import_aliases)
+    for _, syms in g_file_symbols {
+        for alias, i in syms.import_aliases {
+            if alias != "_" && alias != "" && i < len(syms.import_paths) {
+                g_index.import_aliases[strings.clone(alias, g_persistent_allocator)] = strings.clone(syms.import_paths[i], g_persistent_allocator)
+            }
+        }
+    }
+
+    valid_sources := make(map[string]bool)
+    for alias in g_index.import_aliases { valid_sources[alias] = true }
+
+    for name, source in g_index.imported_struct_sources {
+        g_index.inactive_sources[source] = source not_in valid_sources
+    }
+    for name, source in g_index.imported_enum_sources {
+        g_index.inactive_sources[source] = source not_in valid_sources
+    }
+
+    delete(valid_sources)
+
     resolve_and_load_imports(&g_index, p)
 }
 
@@ -1278,16 +1306,18 @@ completions_unqualified :: proc(prefix: string) -> string {
     for name in g_index.all_imported_structs {
         if name in g_index.own_structs { continue }
         if !strings.has_prefix(name, prefix) { continue }
+        source_alias := g_index.imported_struct_sources[name]
+        if g_index.inactive_sources[source_alias] { continue }
         strings.write_string(&sb, name)
         if conflicts, is_conflict := g_index.imported_struct_conflicts[name]; is_conflict {
             strings.write_string(&sb, "\tambiguous: ")
             for c, i in conflicts { 
                 if i > 0 { strings.write_string(&sb, ", ") }
+                if g_index.inactive_sources[c] { continue }
                 import_path := g_index.import_aliases[c]
                 strings.write_string(&sb, import_path if import_path != "" else c)
             }
         } else {
-            source_alias := g_index.imported_struct_sources[name]
             import_path := g_index.import_aliases[source_alias]
             strings.write_string(&sb, "\t")
             strings.write_string(&sb, import_path if import_path != "" else source_alias)
@@ -1297,16 +1327,18 @@ completions_unqualified :: proc(prefix: string) -> string {
     for name in g_index.all_imported_enums {
         if name in g_index.own_enums { continue }
         if !strings.has_prefix(name, prefix) { continue }
+        source_alias := g_index.imported_enum_sources[name]
+        if g_index.inactive_sources[source_alias] { continue }
         strings.write_string(&sb, name)
         if conflicts, is_conflict := g_index.imported_enum_conflicts[name]; is_conflict {
             strings.write_string(&sb, "\tambiguous: ")
             for c, i in conflicts { 
                 if i > 0 { strings.write_string(&sb, ", ") }
+                if g_index.inactive_sources[c] { continue }
                 import_path := g_index.import_aliases[c]
                 strings.write_string(&sb, import_path if import_path != "" else c)
             }
         } else {
-            source_alias := g_index.imported_enum_sources[name]
             import_path := g_index.import_aliases[source_alias]
             strings.write_string(&sb, "\t")
             strings.write_string(&sb, import_path if import_path != "" else source_alias)

@@ -1,3 +1,9 @@
+## 21
+
+### Fixed
+
+- Don't suggest removed imports
+
 ## 20
 
 ### Added
