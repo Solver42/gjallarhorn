@@ -264,6 +264,23 @@ derive_import_alias :: proc(path: string) -> string {
     return path[last + 1:]
 }
 
+is_keyword :: proc(word: string) -> bool {
+    switch word {
+    case "case", "switch", "if", "else", "for", "when", "where", "return", "defer", "break", "continue":
+        return true
+    }
+    return false
+}
+
+skip_to_next_statement :: proc(l: ^Lexer) {
+    start_line := l.line
+    for {
+        tok := lexer_peek(l)
+        if tok.kind == .EOF || tok.line > start_line { return }
+        lexer_next(l)
+    }
+}
+
 parse_dotted_type_name :: proc(l: ^Lexer, first: string) -> string {
     sb := strings.builder_make()
     strings.write_string(&sb, first)
@@ -300,6 +317,8 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
         loc.line = tok.line
         loc.col  = tok.col
 
+        if is_keyword(name) { continue }
+
         if name == "import" {
             peek := lexer_peek(&l)
             alias, path: string
@@ -320,26 +339,31 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
         if next.kind == .Double_Colon {
             lexer_next(&l)
             after := lexer_peek(&l)
-            if after.kind != .Identifier { continue }
-            switch after.text {
-            case "struct":
+            if after.kind == .Identifier {
+                switch after.text {
+                case "struct":
+                    lexer_next(&l)
+                    s := parse_struct_body(&l)
+                    s.location = loc
+                    idx.own_structs[strings.clone(name)] = s
+                case "enum":
+                    lexer_next(&l)
+                    e := parse_enum_body(&l)
+                    e.location = loc
+                    idx.own_enums[strings.clone(name)] = e
+                case "proc":
+                    lexer_next(&l)
+                    p := parse_proc_signature(&l)
+                    p.location = loc
+                    idx.own_procs[strings.clone(name)] = p
+                case:
+                    lexer_next(&l)
+                    idx.own_variables[strings.clone(name)] = parse_dotted_type_name(&l, after.text)
+                }
+            } else if after.kind == .String_Literal || after.kind == .Other {
                 lexer_next(&l)
-                s := parse_struct_body(&l)
-                s.location = loc
-                idx.own_structs[strings.clone(name)] = s
-            case "enum":
-                lexer_next(&l)
-                e := parse_enum_body(&l)
-                e.location = loc
-                idx.own_enums[strings.clone(name)] = e
-            case "proc":
-                lexer_next(&l)
-                p := parse_proc_signature(&l)
-                p.location = loc
-                idx.own_procs[strings.clone(name)] = p
-            case:
-                lexer_next(&l)
-                idx.own_variables[strings.clone(name)] = parse_dotted_type_name(&l, after.text)
+                skip_to_next_statement(&l)
+                idx.own_variables[strings.clone(name)] = "auto"
             }
             continue
         }
@@ -348,6 +372,29 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
             lexer_next(&l)
             ptr_sigil := ""
             type_tok := lexer_peek(&l)
+            
+            if type_tok.kind == .Other && type_tok.text == "=" {
+                lexer_next(&l)
+                skip_to_next_statement(&l)
+                idx.own_variables[strings.clone(name)] = "auto"
+                continue
+            }
+            
+            if type_tok.kind == .Colon {
+                lexer_next(&l)
+                after := lexer_peek(&l)
+                if after.kind == .String_Literal || after.kind == .Other {
+                    lexer_next(&l)
+                    skip_to_next_statement(&l)
+                } else if after.kind == .Identifier {
+                    lexer_next(&l)
+                    idx.own_variables[strings.clone(name)] = parse_dotted_type_name(&l, after.text)
+                    continue
+                }
+                idx.own_variables[strings.clone(name)] = "auto"
+                continue
+            }
+            
             if type_tok.kind == .Other && type_tok.text == "^" {
                 lexer_next(&l)
                 ptr_sigil = "^"
@@ -357,7 +404,9 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
                 lexer_next(&l)
                 type_str := parse_dotted_type_name(&l, type_tok.text)
                 if ptr_sigil != "" { type_str = strings.concatenate({ptr_sigil, type_str}) }
-                idx.own_variables[strings.clone(name)] = type_str
+                if !is_keyword(type_str) {
+                    idx.own_variables[strings.clone(name)] = type_str
+                }
             }
         }
     }
@@ -1198,12 +1247,16 @@ goto_def :: proc(symbol: string) -> (file: string, line: int, col: int, ok: bool
 completions_from_package :: proc(alias: string, prefix: string) -> string {
     pkg := package_by_alias(alias)
     if pkg == nil { return "" }
+    
+    import_path := g_index.import_aliases[alias]
+    display := import_path if import_path != "" else alias
+    
     sb := strings.builder_make()
     for name in pkg.structs {
-        if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, alias); strings.write_byte(&sb, '\n') }
+        if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, display); strings.write_byte(&sb, '\n') }
     }
     for name in pkg.enums {
-        if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, alias); strings.write_byte(&sb, '\n') }
+        if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, display); strings.write_byte(&sb, '\n') }
     }
     for name, defn in pkg.procs {
         if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, proc_signature_summary(defn)); strings.write_byte(&sb, '\n') }
@@ -1228,9 +1281,16 @@ completions_unqualified :: proc(prefix: string) -> string {
         strings.write_string(&sb, name)
         if conflicts, is_conflict := g_index.imported_struct_conflicts[name]; is_conflict {
             strings.write_string(&sb, "\tambiguous: ")
-            for c, i in conflicts { if i > 0 { strings.write_string(&sb, ", ") }; strings.write_string(&sb, c) }
+            for c, i in conflicts { 
+                if i > 0 { strings.write_string(&sb, ", ") }
+                import_path := g_index.import_aliases[c]
+                strings.write_string(&sb, import_path if import_path != "" else c)
+            }
         } else {
-            strings.write_string(&sb, "\timport")
+            source_alias := g_index.imported_struct_sources[name]
+            import_path := g_index.import_aliases[source_alias]
+            strings.write_string(&sb, "\t")
+            strings.write_string(&sb, import_path if import_path != "" else source_alias)
         }
         strings.write_byte(&sb, '\n')
     }
@@ -1240,9 +1300,16 @@ completions_unqualified :: proc(prefix: string) -> string {
         strings.write_string(&sb, name)
         if conflicts, is_conflict := g_index.imported_enum_conflicts[name]; is_conflict {
             strings.write_string(&sb, "\tambiguous: ")
-            for c, i in conflicts { if i > 0 { strings.write_string(&sb, ", ") }; strings.write_string(&sb, c) }
+            for c, i in conflicts { 
+                if i > 0 { strings.write_string(&sb, ", ") }
+                import_path := g_index.import_aliases[c]
+                strings.write_string(&sb, import_path if import_path != "" else c)
+            }
         } else {
-            strings.write_string(&sb, "\timport")
+            source_alias := g_index.imported_enum_sources[name]
+            import_path := g_index.import_aliases[source_alias]
+            strings.write_string(&sb, "\t")
+            strings.write_string(&sb, import_path if import_path != "" else source_alias)
         }
         strings.write_byte(&sb, '\n')
     }
