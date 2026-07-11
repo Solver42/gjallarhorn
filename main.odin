@@ -69,7 +69,6 @@ Project_Index :: struct {
     imported_enum_sources    : map[string]string,
     imported_struct_conflicts: map[string][dynamic]string,
     imported_enum_conflicts  : map[string][dynamic]string,
-    inactive_sources         : map[string]bool,
 }
 
 g_persistent_allocator: mem.Allocator
@@ -119,7 +118,6 @@ make_project_index :: proc() -> Project_Index {
         imported_enum_sources    = make(map[string]string),
         imported_struct_conflicts= make(map[string][dynamic]string),
         imported_enum_conflicts  = make(map[string][dynamic]string),
-        inactive_sources         = make(map[string]bool),
     }
 }
 
@@ -284,19 +282,23 @@ skip_to_next_statement :: proc(l: ^Lexer) {
     }
 }
 
-parse_dotted_type_name :: proc(l: ^Lexer, first: string) -> string {
-    sb := strings.builder_make()
-    strings.write_string(&sb, first)
+parse_type_until :: proc(l: ^Lexer, stop_check: proc(Token_Kind, string) -> bool) -> string {
+    parts := make([dynamic]string, context.allocator)
+    defer delete(parts)
     for {
         pk := lexer_peek(l)
-        if pk.kind != .Other || pk.text != "." { break }
-        lexer_next(l)
-        name := lexer_next(l)
-        if name.kind != .Identifier { break }
-        strings.write_byte(&sb, '.')
-        strings.write_string(&sb, name.text)
+        if stop_check(pk.kind, pk.text) { break }
+        if pk.kind == .Identifier {
+            saved := l.pos; lexer_next(l)
+            next_tok := lexer_peek(l)
+            is_next_decl := next_tok.kind == .Colon || next_tok.kind == .Double_Colon
+            l.pos = saved
+            if is_next_decl { break }
+        }
+        t := lexer_next(l)
+        if t.text != "" { append(&parts, t.text) }
     }
-    return strings.to_string(sb)
+    return strings.join(parts[:], "")
 }
 
 parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
@@ -361,7 +363,10 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
                     idx.own_procs[strings.clone(name)] = p
                 case:
                     lexer_next(&l)
-                    idx.own_variables[strings.clone(name)] = parse_dotted_type_name(&l, after.text)
+                    type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
+                        return k == .EOF || k == .Comma || (k == .Other && t == "{")
+                    })
+                    if type_str != "" { idx.own_variables[strings.clone(name)] = type_str }
                 }
             } else if after.kind == .String_Literal || after.kind == .Other {
                 lexer_next(&l)
@@ -373,7 +378,6 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
 
         if next.kind == .Colon {
             lexer_next(&l)
-            ptr_sigil := ""
             type_tok := lexer_peek(&l)
             
             if type_tok.kind == .Other && type_tok.text == "=" {
@@ -385,31 +389,16 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
             
             if type_tok.kind == .Colon {
                 lexer_next(&l)
-                after := lexer_peek(&l)
-                if after.kind == .String_Literal || after.kind == .Other {
-                    lexer_next(&l)
-                    skip_to_next_statement(&l)
-                } else if after.kind == .Identifier {
-                    lexer_next(&l)
-                    idx.own_variables[strings.clone(name)] = parse_dotted_type_name(&l, after.text)
-                    continue
-                }
+                skip_to_next_statement(&l)
                 idx.own_variables[strings.clone(name)] = "auto"
                 continue
             }
             
-            if type_tok.kind == .Other && type_tok.text == "^" {
-                lexer_next(&l)
-                ptr_sigil = "^"
-                type_tok = lexer_peek(&l)
-            }
-            if type_tok.kind == .Identifier {
-                lexer_next(&l)
-                type_str := parse_dotted_type_name(&l, type_tok.text)
-                if ptr_sigil != "" { type_str = strings.concatenate({ptr_sigil, type_str}) }
-                if !is_keyword(type_str) {
-                    idx.own_variables[strings.clone(name)] = type_str
-                }
+            type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
+                return k == .EOF || (k == .Other && (t == "=" || t == "{" || t == "\n"))
+            })
+            if type_str != "" && !is_keyword(type_str) {
+                idx.own_variables[strings.clone(name)] = type_str
             }
         }
     }
@@ -434,25 +423,14 @@ parse_struct_body :: proc(l: ^Lexer) -> Struct_Definition {
             if lexer_peek(l).kind != .Colon { continue }
             lexer_next(l)
 
-            parts := make([dynamic]string, context.allocator)
-            defer delete(parts)
-            for {
-                pk := lexer_peek(l)
-                if pk.kind == .EOF || pk.kind == .Comma || pk.kind == .Close_Brace { break }
-                if pk.kind == .Identifier {
-                    saved := l.pos; lexer_next(l)
-                    is_next_colon := lexer_peek(l).kind == .Colon
-                    l.pos = saved
-                    if is_next_colon { break }
-                }
-                t := lexer_next(l)
-                if t.text != "" { append(&parts, t.text) }
-            }
+            field_type := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
+                return k == .EOF || k == .Comma || k == .Close_Brace
+            })
             if lexer_peek(l).kind == .Comma { lexer_next(l) }
 
             append(&defn.fields, Struct_Field{
                 name = strings.clone(field_name),
-                type = strings.join(parts[:], ""),
+                type = field_type,
             })
         case:
         }
@@ -715,12 +693,19 @@ register_package_into_index :: proc(idx: ^Project_Index, alias: string, package_
                 idx.all_imported_structs[name] = defn
                 idx.imported_struct_sources[strings.clone(name)] = strings.clone(alias)
             } else {
+                existing_source := idx.imported_struct_sources[name]
+                existing_dir, ok := idx.imported_package_dirs[existing_source]
+                if ok && existing_dir == package_dir { continue }
                 if name not_in idx.imported_struct_conflicts {
                     idx.imported_struct_conflicts[strings.clone(name)] = make([dynamic]string)
-                    append(&idx.imported_struct_conflicts[name], strings.clone(idx.imported_struct_sources[name]))
+                    append(&idx.imported_struct_conflicts[name], strings.clone(existing_source))
                     append(&idx.imported_struct_conflicts[name], strings.clone(alias))
                 } else {
-                    append(&idx.imported_struct_conflicts[name], strings.clone(alias))
+                    found := false
+                    for existing in idx.imported_struct_conflicts[name] {
+                        if existing == alias { found = true; break }
+                    }
+                    if !found { append(&idx.imported_struct_conflicts[name], strings.clone(alias)) }
                 }
             }
         }
@@ -731,12 +716,19 @@ register_package_into_index :: proc(idx: ^Project_Index, alias: string, package_
                 idx.all_imported_enums[name] = defn
                 idx.imported_enum_sources[strings.clone(name)] = strings.clone(alias)
             } else {
+                existing_source := idx.imported_enum_sources[name]
+                existing_dir, ok := idx.imported_package_dirs[existing_source]
+                if ok && existing_dir == package_dir { continue }
                 if name not_in idx.imported_enum_conflicts {
                     idx.imported_enum_conflicts[strings.clone(name)] = make([dynamic]string)
-                    append(&idx.imported_enum_conflicts[name], strings.clone(idx.imported_enum_sources[name]))
+                    append(&idx.imported_enum_conflicts[name], strings.clone(existing_source))
                     append(&idx.imported_enum_conflicts[name], strings.clone(alias))
                 } else {
-                    append(&idx.imported_enum_conflicts[name], strings.clone(alias))
+                    found := false
+                    for existing in idx.imported_enum_conflicts[name] {
+                        if existing == alias { found = true; break }
+                    }
+                    if !found { append(&idx.imported_enum_conflicts[name], strings.clone(alias)) }
                 }
             }
         }
@@ -971,7 +963,11 @@ reindex_from_content :: proc(path: string, was_cached: bool, src: []u8) {
     file_idx := index_one_file(p, string(src))
     merge_file_into_index(&g_index, &file_idx)
 
+    old_aliases := make(map[string]bool)
+    for alias in g_index.import_aliases { old_aliases[alias] = true }
+
     clear(&g_index.import_aliases)
+    clear(&g_index.imported_package_dirs)
     for _, syms in g_file_symbols {
         for alias, i in syms.import_aliases {
             if alias != "_" && alias != "" && i < len(syms.import_paths) {
@@ -983,13 +979,29 @@ reindex_from_content :: proc(path: string, was_cached: bool, src: []u8) {
     valid_sources := make(map[string]bool)
     for alias in g_index.import_aliases { valid_sources[alias] = true }
 
+    to_delete_structs := make([dynamic]string)
     for name, source in g_index.imported_struct_sources {
-        g_index.inactive_sources[source] = source not_in valid_sources
+        if source not_in valid_sources { append(&to_delete_structs, name) }
     }
-    for name, source in g_index.imported_enum_sources {
-        g_index.inactive_sources[source] = source not_in valid_sources
+    for name in to_delete_structs {
+        delete_key(&g_index.all_imported_structs, name)
+        delete_key(&g_index.imported_struct_sources, name)
+        delete_key(&g_index.imported_struct_conflicts, name)
     }
+    delete(to_delete_structs)
 
+    to_delete_enums := make([dynamic]string)
+    for name, source in g_index.imported_enum_sources {
+        if source not_in valid_sources { append(&to_delete_enums, name) }
+    }
+    for name in to_delete_enums {
+        delete_key(&g_index.all_imported_enums, name)
+        delete_key(&g_index.imported_enum_sources, name)
+        delete_key(&g_index.imported_enum_conflicts, name)
+    }
+    delete(to_delete_enums)
+
+    delete(old_aliases)
     delete(valid_sources)
 
     resolve_and_load_imports(&g_index, p)
@@ -1306,18 +1318,16 @@ completions_unqualified :: proc(prefix: string) -> string {
     for name in g_index.all_imported_structs {
         if name in g_index.own_structs { continue }
         if !strings.has_prefix(name, prefix) { continue }
-        source_alias := g_index.imported_struct_sources[name]
-        if g_index.inactive_sources[source_alias] { continue }
         strings.write_string(&sb, name)
         if conflicts, is_conflict := g_index.imported_struct_conflicts[name]; is_conflict {
             strings.write_string(&sb, "\tambiguous: ")
             for c, i in conflicts { 
                 if i > 0 { strings.write_string(&sb, ", ") }
-                if g_index.inactive_sources[c] { continue }
                 import_path := g_index.import_aliases[c]
                 strings.write_string(&sb, import_path if import_path != "" else c)
             }
         } else {
+            source_alias := g_index.imported_struct_sources[name]
             import_path := g_index.import_aliases[source_alias]
             strings.write_string(&sb, "\t")
             strings.write_string(&sb, import_path if import_path != "" else source_alias)
@@ -1327,18 +1337,16 @@ completions_unqualified :: proc(prefix: string) -> string {
     for name in g_index.all_imported_enums {
         if name in g_index.own_enums { continue }
         if !strings.has_prefix(name, prefix) { continue }
-        source_alias := g_index.imported_enum_sources[name]
-        if g_index.inactive_sources[source_alias] { continue }
         strings.write_string(&sb, name)
         if conflicts, is_conflict := g_index.imported_enum_conflicts[name]; is_conflict {
             strings.write_string(&sb, "\tambiguous: ")
             for c, i in conflicts { 
                 if i > 0 { strings.write_string(&sb, ", ") }
-                if g_index.inactive_sources[c] { continue }
                 import_path := g_index.import_aliases[c]
                 strings.write_string(&sb, import_path if import_path != "" else c)
             }
         } else {
+            source_alias := g_index.imported_enum_sources[name]
             import_path := g_index.import_aliases[source_alias]
             strings.write_string(&sb, "\t")
             strings.write_string(&sb, import_path if import_path != "" else source_alias)

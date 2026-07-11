@@ -1,3 +1,10 @@
+## 22
+
+### Fixed
+
+- Adding or deleting import aliases doesn't break autocomplete
+- More robust type parsing
+
 ## 21
 
 ### Fixed
