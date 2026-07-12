@@ -47,9 +47,10 @@ Symbol_Ref :: struct {
 }
 
 Package_Symbols :: struct {
-    structs : map[string]Struct_Definition,
-    enums   : map[string]Enum_Definition,
-    procs   : map[string]Proc_Definition,
+    structs   : map[string]Struct_Definition,
+    enums     : map[string]Enum_Definition,
+    procs     : map[string]Proc_Definition,
+    variables : map[string]string,
 }
 
 g_package_cache  : map[string]Package_Symbols
@@ -288,17 +289,35 @@ parse_type_until :: proc(l: ^Lexer, stop_check: proc(Token_Kind, string) -> bool
     for {
         pk := lexer_peek(l)
         if stop_check(pk.kind, pk.text) { break }
-        if pk.kind == .Identifier {
-            saved := l.pos; lexer_next(l)
-            next_tok := lexer_peek(l)
-            is_next_decl := next_tok.kind == .Colon || next_tok.kind == .Double_Colon
-            l.pos = saved
-            if is_next_decl { break }
+        if pk.kind == .Identifier && (len(parts) == 0 || parts[len(parts)-1] != ".") {
+            saved_pos, saved_line, saved_col, saved_mode := l.pos, l.line, l.col, l.mode
+            lexer_next(l)
+            next_kind := lexer_peek(l).kind
+            l.pos, l.line, l.col, l.mode = saved_pos, saved_line, saved_col, saved_mode
+            if next_kind == .Colon || next_kind == .Double_Colon { break }
         }
         t := lexer_next(l)
         if t.text != "" { append(&parts, t.text) }
     }
     return strings.join(parts[:], "")
+}
+
+peek_rhs_type :: proc(l: ^Lexer) -> string {
+    tok := lexer_peek(l)
+    if tok.kind == .String_Literal { skip_to_next_statement(l); return "string" }
+    if tok.kind == .Other && len(tok.text) > 0 && tok.text[0] >= '0' && tok.text[0] <= '9' { skip_to_next_statement(l); return "int" }
+    if tok.kind == .Identifier {
+        switch tok.text {
+        case "true", "false": skip_to_next_statement(l); return "bool"
+        case "nil":           skip_to_next_statement(l); return ""
+        }
+    }
+    type_str := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
+        return k == .EOF || k == .Open_Brace || k == .Colon ||
+               (k == .Other && (t == "=" || t == "\n" || t == "("))
+    })
+    skip_to_next_statement(l)
+    return type_str
 }
 
 parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
@@ -362,16 +381,14 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
                     p.location = loc
                     idx.own_procs[strings.clone(name)] = p
                 case:
-                    lexer_next(&l)
                     type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
-                        return k == .EOF || k == .Comma || (k == .Other && t == "{")
+                        return k == .EOF || k == .Comma || k == .Open_Brace
                     })
                     if type_str != "" { idx.own_variables[strings.clone(name)] = type_str }
                 }
             } else if after.kind == .String_Literal || after.kind == .Other {
-                lexer_next(&l)
-                skip_to_next_statement(&l)
-                idx.own_variables[strings.clone(name)] = "auto"
+                type_str := peek_rhs_type(&l)
+                if type_str != "" { idx.own_variables[strings.clone(name)] = type_str }
             }
             continue
         }
@@ -382,20 +399,21 @@ parse_source_file :: proc(file_path: string, src: string) -> Project_Index {
             
             if type_tok.kind == .Other && type_tok.text == "=" {
                 lexer_next(&l)
-                skip_to_next_statement(&l)
-                idx.own_variables[strings.clone(name)] = "auto"
+                type_str := peek_rhs_type(&l)
+                if type_str != "" { idx.own_variables[strings.clone(name)] = type_str }
                 continue
             }
             
             if type_tok.kind == .Colon {
                 lexer_next(&l)
-                skip_to_next_statement(&l)
-                idx.own_variables[strings.clone(name)] = "auto"
+                type_str := peek_rhs_type(&l)
+                if type_str != "" { idx.own_variables[strings.clone(name)] = type_str }
                 continue
             }
             
             type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
-                return k == .EOF || (k == .Other && (t == "=" || t == "{" || t == "\n"))
+                return k == .EOF || k == .Open_Brace || k == .Colon ||
+                       (k == .Other && (t == "=" || t == "\n"))
             })
             if type_str != "" && !is_keyword(type_str) {
                 idx.own_variables[strings.clone(name)] = type_str
@@ -611,9 +629,10 @@ load_package_symbols :: proc(package_dir: string) {
     context.allocator = virtual.arena_allocator(&g_package_arena)
 
     pkg := Package_Symbols{
-        structs = make(map[string]Struct_Definition),
-        enums   = make(map[string]Enum_Definition),
-        procs   = make(map[string]Proc_Definition),
+        structs   = make(map[string]Struct_Definition),
+        enums     = make(map[string]Enum_Definition),
+        procs     = make(map[string]Proc_Definition),
+        variables = make(map[string]string),
     }
 
     type_aliases := make(map[string]string)
@@ -673,6 +692,8 @@ load_package_symbols :: proc(package_dir: string) {
             copy := Enum_Definition{values = make([dynamic]string, len(entry.values))}
             for v, i in entry.values { copy.values[i] = strings.clone(v) }
             pkg.enums[strings.clone(alias_name)] = copy
+        } else {
+            pkg.variables[strings.clone(alias_name)] = strings.clone(resolved)
         }
     }
 
@@ -1215,8 +1236,32 @@ hover_for_type :: proc(type_name: string) -> string {
     if d, found := g_index.all_imported_enums[lookup];   found { return format_enum(type_name, d)   }
     if alias, name, has_dot := split_at_dot(lookup); has_dot {
         if pkg := package_by_alias(alias); pkg != nil {
-            if d, found := pkg.structs[name]; found { return format_struct(type_name, d) }
-            if d, found := pkg.enums[name];   found { return format_enum(type_name, d)   }
+            if d, found := pkg.structs[name];    found { return format_struct(type_name, d) }
+            if d, found := pkg.enums[name];      found { return format_enum(type_name, d)   }
+            if t, found := pkg.variables[name];  found { return fmt.tprintf("%s: %s", type_name, t) }
+        }
+    }
+    return ""
+}
+
+qualifier_from_ctx :: proc(local_ctx: string, symbol: string) -> string {
+    ctx := local_ctx
+    for line in strings.split_lines_iterator(&ctx) {
+        search := 0
+        for {
+            idx := strings.index(line[search:], symbol)
+            if idx == -1 { break }
+            abs := search + idx
+            dot := abs - 1
+            if dot < 0 || line[dot] != '.' { search = abs + 1; continue }
+            alias_end := dot
+            alias_start := alias_end - 1
+            for alias_start > 0 && (line[alias_start-1] == '_' || (line[alias_start-1] >= 'a' && line[alias_start-1] <= 'z') || (line[alias_start-1] >= 'A' && line[alias_start-1] <= 'Z') || (line[alias_start-1] >= '0' && line[alias_start-1] <= '9')) { alias_start -= 1 }
+            alias := line[alias_start:alias_end]
+            if _, ok := g_index.imported_package_dirs[alias]; ok {
+                return strings.concatenate({alias, ".", symbol}, context.temp_allocator)
+            }
+            search = abs + 1
         }
     }
     return ""
@@ -1226,14 +1271,20 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
     if d, ok := g_index.own_structs[symbol];          ok { return format_struct(symbol, d) }
     if d, ok := g_index.own_enums[symbol];            ok { return format_enum(symbol, d)   }
     if d, ok := g_index.own_procs[symbol];            ok { return format_proc(symbol, d)   }
-    if symbol in g_index.imported_struct_conflicts {
-        return fmt.tprintf("%s: ambiguous (defined in %s)", symbol, strings.join(g_index.imported_struct_conflicts[symbol][:], ", "))
-    }
-    if symbol in g_index.imported_enum_conflicts {
-        return fmt.tprintf("%s: ambiguous (defined in %s)", symbol, strings.join(g_index.imported_enum_conflicts[symbol][:], ", "))
+    if symbol in g_index.imported_struct_conflicts || symbol in g_index.imported_enum_conflicts {
+        if qualified := qualifier_from_ctx(local_ctx, symbol); qualified != "" {
+            if s := hover_for_type(qualified); s != "" { return s }
+        }
+        conflicts := g_index.imported_struct_conflicts[symbol]
+        if len(conflicts) == 0 { conflicts = g_index.imported_enum_conflicts[symbol] }
+        return fmt.tprintf("%s: ambiguous (defined in %s)", symbol, strings.join(conflicts[:], ", "))
     }
     if d, ok := g_index.all_imported_structs[symbol]; ok { return format_struct(symbol, d) }
     if d, ok := g_index.all_imported_enums[symbol];   ok { return format_enum(symbol, d)   }
+
+    if qualified := qualifier_from_ctx(local_ctx, symbol); qualified != "" {
+        if s := hover_for_type(qualified); s != "" { return s }
+    }
 
     type_name := ""
     if t, ok := g_index.own_variables[symbol]; ok {

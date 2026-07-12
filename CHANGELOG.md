@@ -1,8 +1,18 @@
+## 23
+
+### Added
+
+- Hover handles more types
+
+### Fixed
+
+- Go to definition jumps to the correct line
+
 ## 22
 
 ### Fixed
 
-- Adding or deleting import aliases doesn't break autocomplete
+- Don't break on adding or deleting import aliases
 - More robust type parsing
 
 ## 21
