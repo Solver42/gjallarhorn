@@ -1,3 +1,13 @@
+## 24
+
+### Changed
+
+- Cleaner hovers
+
+### Fixed
+
+- Faster hashing
+
 ## 23
 
 ### Added
