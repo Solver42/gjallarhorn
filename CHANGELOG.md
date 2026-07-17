@@ -1,3 +1,9 @@
+## 25
+
+### Fixed
+
+- Go to definition jumps to the correct line after undo
+
 ## 24
 
 ### Changed

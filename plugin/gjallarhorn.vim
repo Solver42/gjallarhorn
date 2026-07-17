@@ -236,9 +236,7 @@ function! gjallarhorn#goto_definition() abort
     let l:word = expand('<cword>')
     if empty(l:word) | return | endif
     let l:fp = expand('%:p')
-    if &modified
-        call s:request(l:fp, ['index_buf', l:fp, join(getline(1, '$'), "\n")])
-    endif
+    call s:request(l:fp, ['index_buf', l:fp, join(getline(1, '$'), "\n")])
     let l:resp = s:request(l:fp, ['goto', l:word])
     if l:resp ==# ''
         silent! normal! gd
