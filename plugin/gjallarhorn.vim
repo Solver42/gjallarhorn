@@ -193,7 +193,7 @@ function! gjallarhorn#completefunc(findstart, base) abort
     let [l:_prefix, l:chain] = s:comp_context()
     let l:frames = &modified
         \ ? ['comp_buf', expand('%:p'), a:base, l:chain, join(getline(1, '$'), "\n"), s:local_ctx()]
-        \ : ['comp', a:base, l:chain, s:local_ctx()]
+        \ : ['comp', expand('%:p'), a:base, l:chain, s:local_ctx()]
     let l:raw = s:request(expand('%:p'), l:frames)
     if l:raw ==# '' | return [] | endif
     let l:candidates = []

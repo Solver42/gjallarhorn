@@ -1,3 +1,11 @@
+## 26
+
+### Added
+
+- Autocomplete shows source file, struct fields and enum values
+- Sort completions
+- Current file shown first in completion list
+
 ## 25
 
 ### Fixed

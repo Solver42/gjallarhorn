@@ -3,6 +3,7 @@ package gjallarhorn
 import "core:hash/xxhash"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
@@ -76,7 +77,6 @@ g_index                : Project_Index
 
 g_file_hash_cache : map[string]u64
 
-// import_aliases maps alias -> import_path; all strings on g_persistent_allocator.
 File_Symbol_Names :: struct {
     struct_names   : [dynamic]string,
     enum_names     : [dynamic]string,
@@ -86,8 +86,6 @@ File_Symbol_Names :: struct {
 }
 g_file_symbols : map[string]File_Symbol_Names
 
-// Per-file scratch arenas. Reset on re-index; only used during parse, not for
-// data that survives into g_file_symbols or g_index.
 g_file_arenas : map[string]virtual.Arena
 
 arena_reset :: proc(arena: ^virtual.Arena) {
@@ -322,15 +320,13 @@ peek_rhs_type :: proc(l: ^Lexer) -> string {
     return type_str
 }
 
-// Parsed result from a single source file, before merging into the project index.
-// All strings are cloned onto context.allocator at call time.
 File_Parse_Result :: struct {
-    file_path      : string,             // interned; shared by all Symbol_Refs in this result
+    file_path      : string,
     own_structs    : map[string]Struct_Definition,
     own_enums      : map[string]Enum_Definition,
     own_procs      : map[string]Proc_Definition,
     own_variables  : map[string]string,
-    import_aliases : map[string]string,  // alias -> import_path
+    import_aliases : map[string]string,
 }
 
 parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
@@ -346,7 +342,7 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
     paren_depth := 0
     brace_depth := 0
 
-    loc := Symbol_Ref{file = result.file_path}  // shared; no per-symbol clone needed
+    loc := Symbol_Ref{file = result.file_path}
 
     for {
         tok := lexer_next(&l)
@@ -767,7 +763,6 @@ register_package_into_index :: proc(idx: ^Project_Index, alias: string, package_
     }
 }
 
-// source_dir is the directory of any file in the project (used to resolve relative imports).
 resolve_and_load_imports :: proc(idx: ^Project_Index, source_dir: string) {
     for alias, import_path in idx.import_aliases {
         if alias == "_" { continue }
@@ -784,21 +779,15 @@ dir_should_be_skipped :: proc(name: string) -> bool {
     return false
 }
 
-// index_one_file parses path/src, records symbol names in g_file_symbols on
-// g_persistent_allocator, and returns a File_Parse_Result also on
-// g_persistent_allocator. The file arena is scratch only; nothing from it escapes.
 index_one_file :: proc(path: string, src: string) -> File_Parse_Result {
     arena := file_arena(path)
     arena_reset(arena)
 
-    // Scratch parse to populate g_file_symbols cheaply; strings are arena-local.
     outer := context.allocator
     context.allocator = virtual.arena_allocator(arena)
     scratch := parse_source_file(path, src)
     context.allocator = outer
 
-    // Record symbol names on the persistent allocator so g_file_symbols entries
-    // stay valid across arena resets.
     context.allocator = g_persistent_allocator
     syms := File_Symbol_Names{
         struct_names   = make([dynamic]string),
@@ -816,7 +805,6 @@ index_one_file :: proc(path: string, src: string) -> File_Parse_Result {
     }
     g_file_symbols[path] = syms
 
-    // Persistent parse: strings survive into g_index.
     persistent := parse_source_file(path, src)
     context.allocator = outer
 
@@ -961,7 +949,6 @@ reindex_from_content :: proc(path: string, was_cached: bool, src: []u8) {
     file_result := index_one_file(p, string(src))
     merge_file_into_index(&g_index, &file_result)
 
-    // Rebuild import alias map from all known file symbols.
     clear(&g_index.import_aliases)
     clear(&g_index.imported_package_dirs)
     for _, syms in g_file_symbols {
@@ -1034,9 +1021,6 @@ package_by_alias :: proc(alias: string) -> ^Package_Symbols {
     return nil
 }
 
-// resolve_to_known_type returns the canonical type name if symbol is a known
-// struct, enum, or variable in the project index. Returns "" if unresolvable.
-// Does not look at local context; call resolve_name_to_type for that.
 resolve_to_known_type :: proc(name: string) -> string {
     if name in g_index.own_structs               { return name }
     if name in g_index.own_enums                 { return name }
@@ -1054,14 +1038,6 @@ resolve_name_to_type :: proc(name: string, local_ctx: string) -> string {
     return ""
 }
 
-// parse_local_vars returns a map[string]string of name->type for local variable
-// declarations visible in src. Caller must delete the map.
-//
-// brace_depth >= 1 means we are inside the function body. Variables declared
-// inside nested blocks (for/if/switch) are included — that is intentional,
-// since we want to resolve names visible at any depth within the procedure.
-// Struct/enum/proc bodies are not reached here because parse_local_vars is
-// only called with the local_ctx snippet (proc header to cursor), not a full file.
 parse_local_vars :: proc(src: string) -> map[string]string {
     vars        := make(map[string]string)
     l           := lexer_make(src)
@@ -1135,14 +1111,12 @@ resolve_local_var_type :: proc(local_ctx: string, var_name: string) -> (string, 
     defer delete(vars)
 
     if t, ok := vars[var_name]; ok {
-        // Follow one level: if the type is a proc name, use its first return type.
         if defn, is_proc := g_index.own_procs[t]; is_proc && len(defn.returns) > 0 {
             return strings.clone(defn.returns[0]), true
         }
         return strings.clone(t), true
     }
 
-    // Check proc parameters from the first line of local_ctx.
     first_line := local_ctx
     if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
     if start := strings.index_byte(first_line, '('); start >= 0 {
@@ -1349,52 +1323,96 @@ completions_from_package :: proc(alias: string, prefix: string) -> string {
     return strings.trim_right(strings.to_string(sb), "\n")
 }
 
-completions_unqualified :: proc(prefix: string) -> string {
-    sb := strings.builder_make()
+Completion_Kind :: enum { Own_Variable, Own_Enum, Own_Proc, Own_Struct, Imported_Enum, Imported_Struct }
 
-    write_if_prefix :: proc(sb: ^strings.Builder, name: string, prefix: string, menu: string) {
-        if !strings.has_prefix(name, prefix) { return }
-        strings.write_string(sb, name); strings.write_byte(sb, '\t'); strings.write_string(sb, menu); strings.write_byte(sb, '\n')
+path_basename :: proc(path: string) -> string {
+    for i := len(path) - 1; i >= 0; i -= 1 {
+        if path[i] == '/' { return path[i+1:] }
+    }
+    return path
+}
+
+completions_unqualified :: proc(prefix: string, current_file: string) -> string {
+    current_basename := path_basename(current_file)
+
+    own_symbol_file := make(map[string]string, context.temp_allocator)
+    for path, syms in g_file_symbols {
+        basename := path_basename(path)
+        for name in syms.struct_names   { own_symbol_file[name] = basename }
+        for name in syms.enum_names     { own_symbol_file[name] = basename }
+        for name in syms.proc_names     { own_symbol_file[name] = basename }
+        for name in syms.variable_names { own_symbol_file[name] = basename }
     }
 
-    conflict_menu :: proc(idx: ^Project_Index, name: string, is_struct: bool) -> string {
-        conflicts := idx.imported_struct_conflicts[name] if is_struct else idx.imported_enum_conflicts[name]
+    conflict_source :: proc(name: string, is_struct: bool) -> string {
+        conflicts := g_index.imported_struct_conflicts[name] if is_struct else g_index.imported_enum_conflicts[name]
         sb := strings.builder_make(context.temp_allocator)
         strings.write_string(&sb, "ambiguous: ")
         for c, i in conflicts {
             if i > 0 { strings.write_string(&sb, ", ") }
-            imp := idx.import_aliases[c]
+            imp := g_index.import_aliases[c]
             strings.write_string(&sb, imp if imp != "" else c)
         }
         return strings.to_string(sb)
     }
 
-    source_menu :: proc(idx: ^Project_Index, name: string, is_struct: bool) -> string {
-        source_alias := idx.imported_struct_sources[name] if is_struct else idx.imported_enum_sources[name]
-        imp := idx.import_aliases[source_alias]
-        return imp if imp != "" else source_alias
+    import_source :: proc(name: string, is_struct: bool) -> string {
+        alias := g_index.imported_struct_sources[name] if is_struct else g_index.imported_enum_sources[name]
+        imp   := g_index.import_aliases[alias]
+        return imp if imp != "" else alias
     }
 
-    for name in g_index.own_structs  { write_if_prefix(&sb, name, prefix, "") }
-    for name in g_index.own_enums    { write_if_prefix(&sb, name, prefix, "") }
+    lines := make([dynamic]string, context.temp_allocator)
+
+    add :: proc(lines: ^[dynamic]string, current_basename: string,
+                name: string, source: string, detail: string, kind: Completion_Kind) {
+        bucket := "1" if source != current_basename else "0"
+        menu   := fmt.tprintf("%s · %s", source, detail) if source != "" else detail
+        key    := fmt.tprintf("%s%s\x01%d\x01%s", bucket, source, int(kind), name)
+        append(lines, fmt.tprintf("%s\x00%s\t%s", key, name, menu))
+    }
+
+    for name, defn in g_index.own_structs {
+        if !strings.has_prefix(name, prefix) { continue }
+        types := make([dynamic]string, context.temp_allocator)
+        for f in defn.fields { append(&types, f.type) }
+        add(&lines, current_basename, name, own_symbol_file[name], strings.join(types[:], " "), .Own_Struct)
+    }
+    for name, defn in g_index.own_enums {
+        if !strings.has_prefix(name, prefix) { continue }
+        add(&lines, current_basename, name, own_symbol_file[name], strings.join(defn.values[:], " "), .Own_Enum)
+    }
     for name, defn in g_index.own_procs {
-        if strings.has_prefix(name, prefix) {
-            strings.write_string(&sb, name); strings.write_byte(&sb, '\t')
-            strings.write_string(&sb, proc_signature_summary(defn)); strings.write_byte(&sb, '\n')
-        }
-    }
-    for name in g_index.all_imported_structs {
-        if name in g_index.own_structs { continue }
-        menu := conflict_menu(&g_index, name, true) if name in g_index.imported_struct_conflicts else source_menu(&g_index, name, true)
-        write_if_prefix(&sb, name, prefix, menu)
-    }
-    for name in g_index.all_imported_enums {
-        if name in g_index.own_enums { continue }
-        menu := conflict_menu(&g_index, name, false) if name in g_index.imported_enum_conflicts else source_menu(&g_index, name, false)
-        write_if_prefix(&sb, name, prefix, menu)
+        if !strings.has_prefix(name, prefix) { continue }
+        add(&lines, current_basename, name, own_symbol_file[name], proc_signature_summary(defn), .Own_Proc)
     }
     for name, type_name in g_index.own_variables {
-        write_if_prefix(&sb, name, prefix, type_name)
+        if !strings.has_prefix(name, prefix) { continue }
+        add(&lines, current_basename, name, own_symbol_file[name], type_name, .Own_Variable)
+    }
+    for name in g_index.all_imported_structs {
+        if !strings.has_prefix(name, prefix) || name in g_index.own_structs { continue }
+        defn   := g_index.all_imported_structs[name]
+        types  := make([dynamic]string, context.temp_allocator)
+        for f in defn.fields { append(&types, f.type) }
+        source := conflict_source(name, true) if name in g_index.imported_struct_conflicts else import_source(name, true)
+        add(&lines, current_basename, name, source, strings.join(types[:], " "), .Imported_Struct)
+    }
+    for name in g_index.all_imported_enums {
+        if !strings.has_prefix(name, prefix) || name in g_index.own_enums { continue }
+        defn   := g_index.all_imported_enums[name]
+        source := conflict_source(name, false) if name in g_index.imported_enum_conflicts else import_source(name, false)
+        add(&lines, current_basename, name, source, strings.join(defn.values[:], " "), .Imported_Enum)
+    }
+
+    slice.sort(lines[:])
+
+    sb := strings.builder_make()
+    for line in lines {
+        if sep := strings.index_byte(line, '\x00'); sep >= 0 {
+            strings.write_string(&sb, line[sep+1:])
+            strings.write_byte(&sb, '\n')
+        }
     }
     return strings.trim_right(strings.to_string(sb), "\n")
 }
@@ -1430,8 +1448,8 @@ completions_for_type :: proc(type_name: string, prefix: string, local_ctx: strin
     return strings.trim_right(strings.to_string(sb), "\n")
 }
 
-completions_for_request :: proc(prefix: string, dot_chain: string, local_ctx: string) -> string {
-    if dot_chain == "" { return completions_unqualified(prefix) }
+completions_for_request :: proc(prefix: string, dot_chain: string, local_ctx: string, current_file: string) -> string {
+    if dot_chain == "" { return completions_unqualified(prefix, current_file) }
 
     segments      := strings.split(dot_chain, ".")
     defer delete(segments)
@@ -1611,12 +1629,13 @@ handle_client :: proc(client_fd: posix.FD) {
 
         switch cmd {
         case "comp":
-            prefix,    p_ok := read_frame(client_fd, context.temp_allocator); if !p_ok { return }
-            dot_chain, d_ok := read_frame(client_fd, context.temp_allocator); if !d_ok { return }
-            local_ctx, l_ok := read_frame(client_fd, context.temp_allocator); if !l_ok { return }
+            current_file, cf_ok := read_frame(client_fd, context.temp_allocator); if !cf_ok { return }
+            prefix,       p_ok  := read_frame(client_fd, context.temp_allocator); if !p_ok  { return }
+            dot_chain,    d_ok  := read_frame(client_fd, context.temp_allocator); if !d_ok  { return }
+            local_ctx,    l_ok  := read_frame(client_fd, context.temp_allocator); if !l_ok  { return }
 
             context.allocator = context.temp_allocator
-            result := completions_for_request(prefix, dot_chain, local_ctx)
+            result := completions_for_request(prefix, dot_chain, local_ctx, current_file)
             write_frame(client_fd, result)
 
         case "comp_buf":
@@ -1629,7 +1648,7 @@ handle_client :: proc(client_fd: posix.FD) {
             context.allocator = g_persistent_allocator
             rebuild_index_from_buf(path, buf)
             context.allocator = context.temp_allocator
-            result := completions_for_request(prefix, dot_chain, local_ctx)
+            result := completions_for_request(prefix, dot_chain, local_ctx, path)
             write_frame(client_fd, result)
 
         case "hover":
