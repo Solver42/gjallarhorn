@@ -1,3 +1,9 @@
+## 27
+
+### Fixed
+
+- Handle rune literals
+
 ## 26
 
 ### Added

@@ -213,6 +213,17 @@ lexer_next :: proc(l: ^Lexer) -> Token {
         return {kind = .String_Literal, text = text, line = start_line, col = start_col}
     }
 
+    if c == '\'' {
+        start := l.pos
+        advance_pos(l)
+        for l.pos < len(l.src) && l.src[l.pos] != '\'' {
+            if l.src[l.pos] == '\\' { l.pos += 1; l.col += 1 }
+            advance_pos(l)
+        }
+        if l.pos < len(l.src) { advance_pos(l) }
+        return {kind = .Other, text = l.src[start:l.pos], line = start_line, col = start_col}
+    }
+
     if c == '{' { advance_pos(l); return {kind = .Open_Brace,  text = "{", line = start_line, col = start_col} }
     if c == '}' { advance_pos(l); return {kind = .Close_Brace, text = "}", line = start_line, col = start_col} }
     if c == ',' { advance_pos(l); return {kind = .Comma,       text = ",", line = start_line, col = start_col} }
