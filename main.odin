@@ -62,6 +62,7 @@ Project_Index :: struct {
     own_enums                : map[string]Enum_Definition,
     own_procs                : map[string]Proc_Definition,
     own_variables            : map[string]string,
+    own_constants            : map[string]string,
     import_aliases           : map[string]string,
     imported_package_dirs    : map[string]string,
     all_imported_structs     : map[string]Struct_Definition,
@@ -110,6 +111,7 @@ make_project_index :: proc() -> Project_Index {
         own_enums                 = make(map[string]Enum_Definition),
         own_procs                 = make(map[string]Proc_Definition),
         own_variables             = make(map[string]string),
+        own_constants             = make(map[string]string),
         import_aliases            = make(map[string]string),
         imported_package_dirs     = make(map[string]string),
         all_imported_structs      = make(map[string]Struct_Definition),
@@ -337,6 +339,7 @@ File_Parse_Result :: struct {
     own_enums      : map[string]Enum_Definition,
     own_procs      : map[string]Proc_Definition,
     own_variables  : map[string]string,
+    own_constants  : map[string]string,
     import_aliases : map[string]string,
 }
 
@@ -347,6 +350,7 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
         own_enums      = make(map[string]Enum_Definition),
         own_procs      = make(map[string]Proc_Definition),
         own_variables  = make(map[string]string),
+        own_constants  = make(map[string]string),
         import_aliases = make(map[string]string),
     }
     l           := lexer_make(src)
@@ -417,8 +421,13 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
                     if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
                 }
             } else if after.kind == .String_Literal || after.kind == .Other {
-                type_str := peek_rhs_type(&l)
-                if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
+                rhs_start := l.pos
+                type_str  := peek_rhs_type(&l)
+                if type_str != "" {
+                    result.own_variables[strings.clone(name)] = type_str
+                    raw_val := after.text if after.kind == .String_Literal else strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                    if raw_val != "" { result.own_constants[strings.clone(name)] = strings.clone(raw_val) }
+                }
             }
             continue
         }
@@ -436,17 +445,69 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
 
             if type_tok.kind == .Colon {
                 lexer_next(&l)
-                type_str := peek_rhs_type(&l)
-                if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
+                after := lexer_peek(&l)
+                if after.kind == .Identifier {
+                    switch after.text {
+                    case "struct":
+                        lexer_next(&l)
+                        s := parse_struct_body(&l)
+                        s.location = loc
+                        result.own_structs[strings.clone(name)] = s
+                    case "enum":
+                        lexer_next(&l)
+                        e := parse_enum_body(&l)
+                        e.location = loc
+                        result.own_enums[strings.clone(name)] = e
+                    case "proc":
+                        lexer_next(&l)
+                        p := parse_proc_signature(&l)
+                        p.location = loc
+                        result.own_procs[strings.clone(name)] = p
+                    case:
+                        type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
+                            return k == .EOF || k == .Comma || k == .Open_Brace
+                        })
+                        if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
+                    }
+                } else if after.kind == .String_Literal || after.kind == .Other {
+                    rhs_start := l.pos
+                    type_str  := peek_rhs_type(&l)
+                    if type_str != "" {
+                        result.own_variables[strings.clone(name)] = type_str
+                        raw_val := after.text if after.kind == .String_Literal else strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                        if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
+                        if raw_val != "" { result.own_constants[strings.clone(name)] = strings.clone(raw_val) }
+                    }
+                }
                 continue
             }
 
-            type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
-                return k == .EOF || k == .Comma || k == .Open_Brace || k == .Colon ||
-                       (k == .Other && (t == "=" || t == "\n"))
-            })
+            type_parts  := make([dynamic]string, context.temp_allocator)
+            start_line  := type_tok.line
+            depth := 0
+            for {
+                pk := lexer_peek(&l)
+                if pk.kind == .EOF || pk.line > start_line { break }
+                if pk.kind == .Colon && depth == 0 { break }
+                if pk.kind == .Other && pk.text == "=" && depth == 0 { break }
+                if pk.kind == .Open_Brace { break }
+                if pk.kind == .Other && pk.text == "(" { depth += 1 }
+                if pk.kind == .Other && pk.text == ")" && depth > 0 { depth -= 1 }
+                t := lexer_next(&l)
+                if t.text != "" { append(&type_parts, t.text) }
+            }
+            type_str := strings.join(type_parts[:], "")
+
             if type_str != "" && !is_keyword(type_str) {
                 result.own_variables[strings.clone(name)] = type_str
+                if lexer_peek(&l).kind == .Colon {
+                    lexer_next(&l)
+                    val_tok := lexer_peek(&l)
+                    raw_val := val_tok.text if val_tok.kind == .String_Literal else strings.trim_right(l.src[l.pos:], " \t\r\n")
+                    if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
+                    if raw_val != "" { result.own_constants[strings.clone(name)] = strings.clone(raw_val) }
+                    skip_to_next_statement(&l)
+                }
             }
         }
     }
@@ -882,6 +943,7 @@ merge_file_into_index :: proc(idx: ^Project_Index, file_result: ^File_Parse_Resu
     for k, &e in file_result.own_enums      { idx.own_enums[k]      = e }
     for k,  v in file_result.own_procs      { idx.own_procs[k]      = v }
     for k,  v in file_result.own_variables  { idx.own_variables[k]  = v }
+    for k,  v in file_result.own_constants  { idx.own_constants[k]  = v }
     for k,  v in file_result.import_aliases { idx.import_aliases[k] = v }
 }
 
@@ -900,6 +962,7 @@ project_index_destroy :: proc(idx: ^Project_Index) {
     delete(idx.own_enums)
     delete(idx.own_procs)
     delete(idx.own_variables)
+    delete(idx.own_constants)
     delete(idx.import_aliases)
     delete(idx.all_imported_structs)
     delete(idx.all_imported_enums)
@@ -954,7 +1017,7 @@ reindex_from_content :: proc(path: string, was_cached: bool, src: []u8) {
         for name in old_syms.struct_names   { delete_key(&g_index.own_structs,   name) }
         for name in old_syms.enum_names     { delete_key(&g_index.own_enums,     name) }
         for name in old_syms.proc_names     { delete_key(&g_index.own_procs,     name) }
-        for name in old_syms.variable_names { delete_key(&g_index.own_variables, name) }
+        for name in old_syms.variable_names { delete_key(&g_index.own_variables, name); delete_key(&g_index.own_constants, name) }
     }
 
     file_result := index_one_file(p, string(src))
@@ -1049,7 +1112,7 @@ resolve_name_to_type :: proc(name: string, local_ctx: string) -> string {
     return ""
 }
 
-parse_local_vars :: proc(src: string) -> map[string]string {
+parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[string]string {
     vars        := make(map[string]string)
     l           := lexer_make(src)
     paren_depth := 0
@@ -1081,8 +1144,15 @@ parse_local_vars :: proc(src: string) -> map[string]string {
                 })
                 if type_str != "" { vars[strings.clone(name)] = type_str }
             } else if after.kind == .String_Literal || after.kind == .Other {
-                type_str := peek_rhs_type(&l)
-                if type_str != "" { vars[strings.clone(name)] = type_str }
+                rhs_start := l.pos
+                type_str  := peek_rhs_type(&l)
+                if type_str != "" {
+                    vars[strings.clone(name)] = type_str
+                    if consts != nil {
+                        raw_val := after.text if after.kind == .String_Literal else strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                        if raw_val != "" { consts[strings.clone(name)] = strings.clone(raw_val) }
+                    }
+                }
             }
             continue
         }
@@ -1100,17 +1170,52 @@ parse_local_vars :: proc(src: string) -> map[string]string {
 
             if type_tok.kind == .Colon {
                 lexer_next(&l)
-                type_str := peek_rhs_type(&l)
-                if type_str != "" { vars[strings.clone(name)] = type_str }
+                after := lexer_peek(&l)
+                if after.kind == .Identifier && (after.text == "struct" || after.text == "enum" || after.text == "proc") {
+                } else if after.kind == .String_Literal || after.kind == .Other {
+                    rhs_start := l.pos
+                    type_str  := peek_rhs_type(&l)
+                    if type_str != "" {
+                        vars[strings.clone(name)] = type_str
+                        if consts != nil {
+                            raw_val := after.text if after.kind == .String_Literal else strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                            if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
+                            if raw_val != "" { consts[strings.clone(name)] = strings.clone(raw_val) }
+                        }
+                    }
+                } else if after.kind == .Identifier {
+                    type_str := peek_rhs_type(&l)
+                    if type_str != "" { vars[strings.clone(name)] = type_str }
+                }
                 continue
             }
 
-            type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
-                return k == .EOF || k == .Comma || k == .Open_Brace || k == .Colon ||
-                       (k == .Other && (t == "=" || t == "\n"))
-            })
+            type_parts := make([dynamic]string, context.temp_allocator)
+            start_line := type_tok.line
+            depth := 0
+            for {
+                pk := lexer_peek(&l)
+                if pk.kind == .EOF || pk.line > start_line { break }
+                if pk.kind == .Colon && depth == 0 { break }
+                if pk.kind == .Other && pk.text == "=" && depth == 0 { break }
+                if pk.kind == .Open_Brace { break }
+                if pk.kind == .Other && pk.text == "(" { depth += 1 }
+                if pk.kind == .Other && pk.text == ")" && depth > 0 { depth -= 1 }
+                t := lexer_next(&l)
+                if t.text != "" { append(&type_parts, t.text) }
+            }
+            type_str := strings.join(type_parts[:], "")
+
             if type_str != "" && !is_keyword(type_str) {
                 vars[strings.clone(name)] = type_str
+                if consts != nil && lexer_peek(&l).kind == .Colon {
+                    lexer_next(&l)
+                    val_tok := lexer_peek(&l)
+                    raw_val := val_tok.text if val_tok.kind == .String_Literal else strings.trim_right(l.src[l.pos:], " \t\r\n")
+                    if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
+                    if raw_val != "" { consts[strings.clone(name)] = strings.clone(raw_val) }
+                    skip_to_next_statement(&l)
+                }
             }
         }
     }
@@ -1264,11 +1369,30 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
         if s := hover_for_type(qualified); s != "" { return s }
     }
 
-    type_name := ""
+    if v, ok := g_index.own_constants[symbol]; ok { return v }
+
+    type_name    := ""
+    local_consts := make(map[string]string)
+    defer delete(local_consts)
     if t, ok := g_index.own_variables[symbol]; ok {
         type_name = t
-    } else if t, ok := resolve_local_var_type(local_ctx, symbol); ok {
-        type_name = t
+    } else {
+        vars := parse_local_vars(local_ctx, &local_consts)
+        defer delete(vars)
+        if v, ok := local_consts[symbol]; ok { return v }
+        if t, ok := vars[symbol]; ok {
+            if defn, is_proc := g_index.own_procs[t]; is_proc && len(defn.returns) > 0 {
+                type_name = defn.returns[0]
+            } else {
+                type_name = t
+            }
+        } else {
+            first_line := local_ctx
+            if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
+            if start := strings.index_byte(first_line, '('); start >= 0 {
+                if t, ok := param_type_from_sig(first_line[start:], symbol); ok { type_name = t }
+            }
+        }
     }
 
     if type_name != "" {

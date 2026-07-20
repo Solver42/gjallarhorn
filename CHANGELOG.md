@@ -1,3 +1,13 @@
+## 28
+
+### Added
+
+- Hover shows constant values
+
+### Fixed
+
+- Handle spaces between colons
+
 ## 27
 
 ### Fixed
