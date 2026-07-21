@@ -125,7 +125,7 @@ make_project_index :: proc() -> Project_Index {
 
 Token_Kind :: enum { EOF, Identifier, String_Literal, Double_Colon, Open_Brace, Close_Brace, Comma, Colon, Other }
 
-Token :: struct { kind: Token_Kind, text: string, line: int, col: int }
+Token : : struct { kind: Token_Kind, text: string, line: int, col: int }
 
 Lexer_Mode :: enum { Normal, In_String, In_Block_Comment }
 Lexer :: struct { src: string, pos: int, line: int, col: int, mode: Lexer_Mode }
@@ -1417,7 +1417,7 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
     return ""
 }
 
-goto_def :: proc(symbol: string) -> (file: string, line: int, col: int, ok: bool) {
+goto_def :: proc(symbol: string, local_ctx: string) -> (file: string, line: int, col: int, ok: bool) {
     if d, found := g_index.own_structs[symbol]; found { loc := d.location; return loc.file, loc.line, loc.col, true }
     if d, found := g_index.own_enums[symbol];   found { loc := d.location; return loc.file, loc.line, loc.col, true }
     if d, found := g_index.own_procs[symbol];   found { loc := d.location; return loc.file, loc.line, loc.col, true }
@@ -1425,16 +1425,6 @@ goto_def :: proc(symbol: string) -> (file: string, line: int, col: int, ok: bool
     if symbol in g_index.imported_enum_conflicts   { return "", 0, 0, false }
     if d, found := g_index.all_imported_structs[symbol]; found { loc := d.location; return loc.file, loc.line, loc.col, true }
     if d, found := g_index.all_imported_enums[symbol];   found { loc := d.location; return loc.file, loc.line, loc.col, true }
-
-    type_name := resolve_to_known_type(symbol)
-    if type_name != "" && type_name != symbol {
-        if type_name in g_index.imported_struct_conflicts { return "", 0, 0, false }
-        if type_name in g_index.imported_enum_conflicts   { return "", 0, 0, false }
-        if d, found := g_index.own_structs[type_name];          found { loc := d.location; return loc.file, loc.line, loc.col, true }
-        if d, found := g_index.own_enums[type_name];            found { loc := d.location; return loc.file, loc.line, loc.col, true }
-        if d, found := g_index.all_imported_structs[type_name]; found { loc := d.location; return loc.file, loc.line, loc.col, true }
-        if d, found := g_index.all_imported_enums[type_name];   found { loc := d.location; return loc.file, loc.line, loc.col, true }
-    }
     return "", 0, 0, false
 }
 
@@ -1794,12 +1784,14 @@ handle_client :: proc(client_fd: posix.FD) {
             result := hover_info(sym, local_ctx)
             write_frame(client_fd, result)
 
-        case "goto":
-            sym, sym_ok := read_frame(client_fd, context.temp_allocator)
+		case "goto":
+            sym,       sym_ok := read_frame(client_fd, context.temp_allocator)
             if !sym_ok { return }
+            local_ctx, ctx_ok := read_frame(client_fd, context.temp_allocator)
+            if !ctx_ok { return }
 
             context.allocator = context.temp_allocator
-            file, line, col, ok := goto_def(sym)
+            file, line, col, ok := goto_def(sym, local_ctx)
             if ok {
                 write_frame(client_fd, fmt.tprintf("%s\x00%d\x00%d", file, line, col))
             } else {

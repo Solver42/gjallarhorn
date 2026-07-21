@@ -1,3 +1,10 @@
+## 29
+
+### Fixed
+
+- Handle string literals containing escape sequences
+- Go to definition for local variable
+
 ## 28
 
 ### Added

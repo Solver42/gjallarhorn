@@ -171,6 +171,9 @@ endfunction
 function! s:local_ctx() abort
     let l:cur = line('.')
     let l:start = l:cur
+    if getline(l:cur) =~# '^\S.*::\s*proc\>'
+        return [l:cur, join(getline(l:cur, l:cur), "\n")]
+    endif
     while l:start > 1
         if getline(l:start - 1) =~# '^\S.*::\s*proc\>'
             let l:start -= 1
@@ -178,7 +181,7 @@ function! s:local_ctx() abort
         endif
         let l:start -= 1
     endwhile
-    return join(getline(l:start, l:cur), "\n")
+    return [l:start, join(getline(l:start, l:cur), "\n")]
 endfunction
 
 function! gjallarhorn#completefunc(findstart, base) abort
@@ -191,9 +194,10 @@ function! gjallarhorn#completefunc(findstart, base) abort
         return l:col
     endif
     let [l:_prefix, l:chain] = s:comp_context()
+    let [l:_start, l:ctx] = s:local_ctx()
     let l:frames = &modified
-        \ ? ['comp_buf', expand('%:p'), a:base, l:chain, join(getline(1, '$'), "\n"), s:local_ctx()]
-        \ : ['comp', expand('%:p'), a:base, l:chain, s:local_ctx()]
+        \ ? ['comp_buf', expand('%:p'), a:base, l:chain, join(getline(1, '$'), "\n"), l:ctx]
+        \ : ['comp', expand('%:p'), a:base, l:chain, l:ctx]
     let l:raw = s:request(expand('%:p'), l:frames)
     if l:raw ==# '' | return [] | endif
     let l:candidates = []
@@ -215,8 +219,9 @@ function! gjallarhorn#toggle_hover() abort
     endif
     let l:word = expand('<cword>')
     if empty(l:word) | return | endif
-    if (len(substitute(strpart(getline('.'), 0, col('.') - 1), '[^\"]', '', 'g')) % 2) == 1 | return | endif
-    let l:response = s:request(expand('%:p'), ['hover', l:word, s:local_ctx()])
+    if (len(substitute(strpart(getline('.'), 0, col('.') - 1), '[^"]', '', 'g')) % 2) == 1 | return | endif
+    let [l:_start, l:ctx] = s:local_ctx()
+    let l:response = s:request(expand('%:p'), ['hover', l:word, l:ctx])
     if l:response =~# '^\s*$' | return | endif
     let l:lines = split(trim(l:response), '\n')
     if empty(l:lines) | return | endif
@@ -237,9 +242,16 @@ function! gjallarhorn#goto_definition() abort
     if empty(l:word) | return | endif
     let l:fp = expand('%:p')
     call s:request(l:fp, ['index_buf', l:fp, join(getline(1, '$'), "\n")])
-    let l:resp = s:request(l:fp, ['goto', l:word])
+    let [l:sig_line, l:ctx] = s:local_ctx()
+    let l:resp = s:request(l:fp, ['goto', l:word, l:ctx])
     if l:resp ==# ''
-        silent! normal! gd
+        let l:col = match(getline(l:sig_line), '\<' . l:word . '\>') + 1
+        if l:col > 0
+            normal! m'
+            call cursor(l:sig_line, l:col)
+        else
+            silent! normal! gd
+        endif
         return
     endif
     let l:parts = split(l:resp, "\x00")
