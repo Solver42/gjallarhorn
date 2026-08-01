@@ -1,9 +1,27 @@
+## 30
+
+### Added
+
+- Go to definition for unions
+- Hover for unions
+- Autocomplete for unions
+- Go to definition for global variables
+- Multiple field declaration
+- #type
+- Backtick strings
+
+### Changed
+
+- Faster parsing on large files
+- Lower memory usage during parsing
+- Faster completions on large projects
+
 ## 29
 
 ### Fixed
 
 - Handle string literals containing escape sequences
-- Go to definition for local variable
+- Go to definition for local variables
 
 ## 28
 

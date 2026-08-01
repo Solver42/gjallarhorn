@@ -34,6 +34,11 @@ Enum_Definition :: struct {
     location : Symbol_Ref,
 }
 
+Union_Definition :: struct {
+    variants : [dynamic]string,
+    location : Symbol_Ref,
+}
+
 Proc_Definition :: struct {
     params   : [dynamic]string,
     returns  : [dynamic]string,
@@ -49,6 +54,7 @@ Symbol_Ref :: struct {
 Package_Symbols :: struct {
     structs   : map[string]Struct_Definition,
     enums     : map[string]Enum_Definition,
+    unions    : map[string]Union_Definition,
     procs     : map[string]Proc_Definition,
     variables : map[string]string,
 }
@@ -60,8 +66,10 @@ g_odin_root     : string
 Project_Index :: struct {
     own_structs              : map[string]Struct_Definition,
     own_enums                : map[string]Enum_Definition,
+    own_unions               : map[string]Union_Definition,
     own_procs                : map[string]Proc_Definition,
     own_variables            : map[string]string,
+    own_variable_locs        : map[string]Symbol_Ref,
     own_constants            : map[string]string,
     import_aliases           : map[string]string,
     imported_package_dirs    : map[string]string,
@@ -81,9 +89,11 @@ g_file_hash_cache : map[string]u64
 File_Symbol_Names :: struct {
     struct_names   : [dynamic]string,
     enum_names     : [dynamic]string,
+    union_names    : [dynamic]string,
     proc_names     : [dynamic]string,
     variable_names : [dynamic]string,
     import_aliases : map[string]string,
+    basename       : string,
 }
 g_file_symbols : map[string]File_Symbol_Names
 
@@ -109,8 +119,10 @@ make_project_index :: proc() -> Project_Index {
     return Project_Index{
         own_structs               = make(map[string]Struct_Definition),
         own_enums                 = make(map[string]Enum_Definition),
+        own_unions                = make(map[string]Union_Definition),
         own_procs                 = make(map[string]Proc_Definition),
         own_variables             = make(map[string]string),
+        own_variable_locs         = make(map[string]Symbol_Ref),
         own_constants             = make(map[string]string),
         import_aliases            = make(map[string]string),
         imported_package_dirs     = make(map[string]string),
@@ -123,12 +135,19 @@ make_project_index :: proc() -> Project_Index {
     }
 }
 
-Token_Kind :: enum { EOF, Identifier, String_Literal, Double_Colon, Open_Brace, Close_Brace, Comma, Colon, Other }
+Token_Kind :: enum { EOF, Identifier, String_Literal, Double_Colon, Open_Brace, Close_Brace, Comma, Colon, Hash, Other }
 
-Token : : struct { kind: Token_Kind, text: string, line: int, col: int }
+Token :: struct { kind: Token_Kind, text: string, line: int, col: int }
 
-Lexer_Mode :: enum { Normal, In_String, In_Block_Comment }
-Lexer :: struct { src: string, pos: int, line: int, col: int, mode: Lexer_Mode }
+Lexer :: struct {
+    src      : string,
+    pos      : int,
+    line     : int,
+    col      : int,
+    in_block : bool,
+    has_peek : bool,
+    peek_tok : Token,
+}
 
 lexer_make :: proc(src: string) -> Lexer { return {src = src, line = 1, col = 1} }
 
@@ -139,45 +158,30 @@ advance_pos :: proc(l: ^Lexer) {
 }
 
 lexer_skip_whitespace_and_comments :: proc(l: ^Lexer) {
-    block_comment_depth := 0
     for l.pos < len(l.src) {
         c := l.src[l.pos]
 
-        if l.mode == .In_Block_Comment {
-            if c == '*' && l.pos + 1 < len(l.src) && l.src[l.pos + 1] == '/' {
-                l.pos += 2; l.col += 2
-                block_comment_depth -= 1
-                if block_comment_depth == 0 { l.mode = .Normal }
-                continue
-            }
-            if c == '/' && l.pos + 1 < len(l.src) && l.src[l.pos + 1] == '*' {
-                l.pos += 2; l.col += 2; block_comment_depth += 1; continue
+        if l.in_block {
+            if c == '*' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '/' {
+                l.pos += 2; l.col += 2; l.in_block = false; continue
             }
             if c == '\n' { l.pos += 1; l.line += 1; l.col = 1 } else { l.pos += 1; l.col += 1 }
             continue
         }
 
-        if c == ' ' || c == '\t' || c == '\r' { l.pos += 1; l.col  += 1; continue }
+        if c == ' ' || c == '\t' || c == '\r' { l.pos += 1; l.col += 1; continue }
         if c == '\n'                           { l.pos += 1; l.line += 1; l.col = 1; continue }
 
-        if c == '/' && l.pos + 1 < len(l.src) {
-            if l.src[l.pos + 1] == '/' {
-                for l.pos < len(l.src) && l.src[l.pos] != '\n' { l.pos += 1 }
-                continue
-            }
-            if l.src[l.pos + 1] == '*' {
-                l.pos += 2; l.col += 2
-                l.mode = .In_Block_Comment
-                block_comment_depth = 1
-                continue
-            }
+        if c == '/' && l.pos+1 < len(l.src) {
+            if l.src[l.pos+1] == '/' { for l.pos < len(l.src) && l.src[l.pos] != '\n' { l.pos += 1 }; continue }
+            if l.src[l.pos+1] == '*' { l.pos += 2; l.col += 2; l.in_block = true; continue }
         }
         break
     }
 }
 
-lexer_next :: proc(l: ^Lexer) -> Token {
-    if l.mode == .Normal { lexer_skip_whitespace_and_comments(l) }
+lexer_next_raw :: proc(l: ^Lexer) -> Token {
+    lexer_skip_whitespace_and_comments(l)
     if l.pos >= len(l.src) { return {kind = .EOF} }
 
     start_line := l.line
@@ -196,14 +200,16 @@ lexer_next :: proc(l: ^Lexer) -> Token {
     }
 
     if c == ':' {
-        if l.pos + 1 < len(l.src) && l.src[l.pos + 1] == ':' { advance_pos(l); advance_pos(l); return {kind = .Double_Colon, text = "::", line = start_line, col = start_col} }
+        if l.pos+1 < len(l.src) && l.src[l.pos+1] == ':' {
+            advance_pos(l); advance_pos(l)
+            return {kind = .Double_Colon, text = "::", line = start_line, col = start_col}
+        }
         advance_pos(l)
         return {kind = .Colon, text = ":", line = start_line, col = start_col}
     }
 
     if c == '"' {
         advance_pos(l)
-        l.mode = .In_String
         start := l.pos
         for l.pos < len(l.src) && l.src[l.pos] != '"' {
             if l.src[l.pos] == '\\' { l.pos += 1; l.col += 1 }
@@ -211,7 +217,15 @@ lexer_next :: proc(l: ^Lexer) -> Token {
         }
         text := l.src[start:l.pos]
         if l.pos < len(l.src) { advance_pos(l) }
-        l.mode = .Normal
+        return {kind = .String_Literal, text = text, line = start_line, col = start_col}
+    }
+
+    if c == '`' {
+        advance_pos(l)
+        start := l.pos
+        for l.pos < len(l.src) && l.src[l.pos] != '`' { advance_pos(l) }
+        text := l.src[start:l.pos]
+        if l.pos < len(l.src) { advance_pos(l) }
         return {kind = .String_Literal, text = text, line = start_line, col = start_col}
     }
 
@@ -229,25 +243,22 @@ lexer_next :: proc(l: ^Lexer) -> Token {
     if c == '{' { advance_pos(l); return {kind = .Open_Brace,  text = "{", line = start_line, col = start_col} }
     if c == '}' { advance_pos(l); return {kind = .Close_Brace, text = "}", line = start_line, col = start_col} }
     if c == ',' { advance_pos(l); return {kind = .Comma,       text = ",", line = start_line, col = start_col} }
+    if c == '#' { advance_pos(l); return {kind = .Hash,        text = "#", line = start_line, col = start_col} }
 
     start := l.pos
     _, w  := utf8.decode_rune_in_string(l.src[l.pos:])
-    l.pos += w
-    l.col += 1
+    l.pos += w; l.col += 1
     return {kind = .Other, text = l.src[start:l.pos], line = start_line, col = start_col}
 }
 
+lexer_next :: proc(l: ^Lexer) -> Token {
+    if l.has_peek { l.has_peek = false; return l.peek_tok }
+    return lexer_next_raw(l)
+}
+
 lexer_peek :: proc(l: ^Lexer) -> Token {
-    saved      := l.pos
-    saved_line := l.line
-    saved_col  := l.col
-    saved_mode := l.mode
-    tok        := lexer_next(l)
-    l.pos       = saved
-    l.line      = saved_line
-    l.col       = saved_col
-    l.mode      = saved_mode
-    return tok
+    if !l.has_peek { l.peek_tok = lexer_next_raw(l); l.has_peek = true }
+    return l.peek_tok
 }
 
 dir_contains_root_marker :: proc(dir: string) -> bool {
@@ -275,12 +286,18 @@ derive_import_alias :: proc(path: string) -> string {
         if path[i] == ':' || path[i] == '/' { last = i }
     }
     if last == -1 { return path }
-    return path[last + 1:]
+    return path[last+1:]
 }
 
 is_keyword :: proc(word: string) -> bool {
     switch word {
-    case "case", "switch", "if", "else", "for", "when", "where", "return", "defer", "break", "continue":
+    case "package",
+         "if", "else", "when", "for", "switch", "case", "do", "fallthrough",
+         "return", "defer", "break", "continue", "where",
+         "in", "not_in", "using",
+         "distinct", "bit_set", "map", "dynamic",
+         "cast", "auto_cast", "transmute",
+         "context", "or_else", "or_return":
         return true
     }
     return false
@@ -289,30 +306,35 @@ is_keyword :: proc(word: string) -> bool {
 skip_to_next_statement :: proc(l: ^Lexer) {
     start_line := l.line
     for {
-        tok := lexer_peek(l)
-        if tok.kind == .EOF || tok.line > start_line { return }
+        pk := lexer_peek(l)
+        if pk.kind == .EOF || pk.line > start_line { return }
         lexer_next(l)
     }
 }
 
-parse_type_until :: proc(l: ^Lexer, stop_check: proc(Token_Kind, string) -> bool, max_line := max(int)) -> string {
-    parts := make([dynamic]string, context.allocator)
-    defer delete(parts)
+write_type_until :: proc(l: ^Lexer, sb: ^strings.Builder, stop_check: proc(Token_Kind, string) -> bool, max_line := max(int)) {
+    prev_was_dot := false
     for {
         pk := lexer_peek(l)
-        if pk.line > max_line { break }
+        if pk.kind == .EOF || pk.line > max_line { break }
         if stop_check(pk.kind, pk.text) { break }
-        if pk.kind == .Identifier && (len(parts) == 0 || parts[len(parts)-1] != ".") {
-            saved_pos, saved_line, saved_col, saved_mode := l.pos, l.line, l.col, l.mode
+        if pk.kind == .Identifier && !prev_was_dot {
+            pos, line, col, in_block, has_peek, peek_tok := l.pos, l.line, l.col, l.in_block, l.has_peek, l.peek_tok
             lexer_next(l)
-            next_kind := lexer_peek(l).kind
-            l.pos, l.line, l.col, l.mode = saved_pos, saved_line, saved_col, saved_mode
-            if next_kind == .Colon || next_kind == .Double_Colon { break }
+            nk := lexer_peek(l).kind
+            l.pos, l.line, l.col, l.in_block, l.has_peek, l.peek_tok = pos, line, col, in_block, has_peek, peek_tok
+            if nk == .Colon || nk == .Double_Colon { break }
         }
         t := lexer_next(l)
-        if t.text != "" { append(&parts, t.text) }
+        prev_was_dot = (t.text == ".")
+        if t.text != "" { strings.write_string(sb, t.text) }
     }
-    return strings.join(parts[:], "")
+}
+
+parse_type_until :: proc(l: ^Lexer, stop_check: proc(Token_Kind, string) -> bool, max_line := max(int)) -> string {
+    sb := strings.builder_make(context.allocator)
+    write_type_until(l, &sb, stop_check, max_line)
+    return strings.to_string(sb)
 }
 
 peek_rhs_type :: proc(l: ^Lexer) -> string {
@@ -337,10 +359,89 @@ File_Parse_Result :: struct {
     file_path      : string,
     own_structs    : map[string]Struct_Definition,
     own_enums      : map[string]Enum_Definition,
+    own_unions     : map[string]Union_Definition,
     own_procs      : map[string]Proc_Definition,
     own_variables  : map[string]string,
+    own_variable_locs : map[string]Symbol_Ref,
     own_constants  : map[string]string,
     import_aliases : map[string]string,
+}
+
+parse_decl_rhs :: proc(l: ^Lexer, name: string, loc: Symbol_Ref, result: ^File_Parse_Result) {
+    after := lexer_peek(l)
+
+    if after.kind == .Identifier {
+        switch after.text {
+        case "struct":
+            lexer_next(l)
+            s := parse_struct_body(l)
+            s.location = loc
+            result.own_structs[strings.clone(name)] = s
+            return
+        case "enum":
+            lexer_next(l)
+            e := parse_enum_body(l)
+            e.location = loc
+            result.own_enums[strings.clone(name)] = e
+            return
+        case "proc":
+            lexer_next(l)
+            p := parse_proc_signature(l)
+            p.location = loc
+            result.own_procs[strings.clone(name)] = p
+            return
+        case "union":
+            lexer_next(l)
+            u := parse_union_body(l)
+            u.location = loc
+            result.own_unions[strings.clone(name)] = u
+            return
+        case "distinct":
+            lexer_next(l)
+            type_str := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
+                return k == .EOF || k == .Comma || k == .Open_Brace
+            })
+            if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
+            return
+        }
+        if after.text == "true" || after.text == "false" {
+            lexer_next(l)
+            result.own_variables[strings.clone(name)] = "bool"
+            result.own_constants[strings.clone(name)] = strings.clone(after.text)
+            return
+        }
+        type_str := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
+            return k == .EOF || k == .Comma || k == .Open_Brace
+        })
+        if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
+        return
+    }
+
+    if after.kind == .Hash {
+        lexer_next(l)
+        dir := lexer_peek(l)
+        if dir.kind == .Identifier {
+            if dir.text == "type" { lexer_next(l); parse_decl_rhs(l, name, loc, result); return }
+        }
+        skip_to_next_statement(l)
+        return
+    }
+
+    if after.kind == .String_Literal || after.kind == .Other {
+        type_str := peek_rhs_type(l)
+        if type_str != "" {
+            result.own_variables[strings.clone(name)] = type_str
+            raw_val : string
+            if after.kind == .String_Literal {
+                raw_val = after.text
+            } else {
+                rhs_start := uintptr(raw_data(after.text)) - uintptr(raw_data(l.src))
+                raw_val = strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
+            }
+            if raw_val != "" { result.own_constants[strings.clone(name)] = strings.clone(raw_val) }
+        }
+    }
 }
 
 parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
@@ -348,8 +449,10 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
         file_path      = strings.clone(file_path),
         own_structs    = make(map[string]Struct_Definition),
         own_enums      = make(map[string]Enum_Definition),
+        own_unions     = make(map[string]Union_Definition),
         own_procs      = make(map[string]Proc_Definition),
         own_variables  = make(map[string]string),
+        own_variable_locs = make(map[string]Symbol_Ref),
         own_constants  = make(map[string]string),
         import_aliases = make(map[string]string),
     }
@@ -364,6 +467,10 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
         if tok.kind == .EOF { break }
         if tok.kind == .Open_Brace  { brace_depth += 1; continue }
         if tok.kind == .Close_Brace { if brace_depth > 0 { brace_depth -= 1 }; continue }
+        if tok.kind == .Hash {
+            if lexer_peek(&l).kind == .Identifier { lexer_next(&l) }
+            continue
+        }
         if tok.kind == .Other {
             if tok.text == "(" { paren_depth += 1 }
             if tok.text == ")" && paren_depth > 0 { paren_depth -= 1 }
@@ -392,43 +499,25 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
             continue
         }
 
+        locs  := make([dynamic]Symbol_Ref, context.temp_allocator)
+        names := make([dynamic]string,     context.temp_allocator)
+        append(&names, name)
+        append(&locs,  loc)
+        for lexer_peek(&l).kind == .Comma {
+            lexer_next(&l)
+            nxt := lexer_peek(&l)
+            if nxt.kind != .Identifier { break }
+            n := lexer_next(&l)
+            if is_keyword(n.text) { break }
+            append(&names, n.text)
+            append(&locs,  Symbol_Ref{file = result.file_path, line = n.line, col = n.col})
+        }
+
         next := lexer_peek(&l)
 
         if next.kind == .Double_Colon {
             lexer_next(&l)
-            after := lexer_peek(&l)
-            if after.kind == .Identifier {
-                switch after.text {
-                case "struct":
-                    lexer_next(&l)
-                    s := parse_struct_body(&l)
-                    s.location = loc
-                    result.own_structs[strings.clone(name)] = s
-                case "enum":
-                    lexer_next(&l)
-                    e := parse_enum_body(&l)
-                    e.location = loc
-                    result.own_enums[strings.clone(name)] = e
-                case "proc":
-                    lexer_next(&l)
-                    p := parse_proc_signature(&l)
-                    p.location = loc
-                    result.own_procs[strings.clone(name)] = p
-                case:
-                    type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
-                        return k == .EOF || k == .Comma || k == .Open_Brace
-                    })
-                    if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
-                }
-            } else if after.kind == .String_Literal || after.kind == .Other {
-                rhs_start := l.pos
-                type_str  := peek_rhs_type(&l)
-                if type_str != "" {
-                    result.own_variables[strings.clone(name)] = type_str
-                    raw_val := after.text if after.kind == .String_Literal else strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
-                    if raw_val != "" { result.own_constants[strings.clone(name)] = strings.clone(raw_val) }
-                }
-            }
+            parse_decl_rhs(&l, names[0], locs[0], &result)
             continue
         }
 
@@ -439,51 +528,23 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
             if type_tok.kind == .Other && type_tok.text == "=" {
                 lexer_next(&l)
                 type_str := peek_rhs_type(&l)
-                if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
-                continue
-            }
-
-            if type_tok.kind == .Colon {
-                lexer_next(&l)
-                after := lexer_peek(&l)
-                if after.kind == .Identifier {
-                    switch after.text {
-                    case "struct":
-                        lexer_next(&l)
-                        s := parse_struct_body(&l)
-                        s.location = loc
-                        result.own_structs[strings.clone(name)] = s
-                    case "enum":
-                        lexer_next(&l)
-                        e := parse_enum_body(&l)
-                        e.location = loc
-                        result.own_enums[strings.clone(name)] = e
-                    case "proc":
-                        lexer_next(&l)
-                        p := parse_proc_signature(&l)
-                        p.location = loc
-                        result.own_procs[strings.clone(name)] = p
-                    case:
-                        type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
-                            return k == .EOF || k == .Comma || k == .Open_Brace
-                        })
-                        if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
-                    }
-                } else if after.kind == .String_Literal || after.kind == .Other {
-                    rhs_start := l.pos
-                    type_str  := peek_rhs_type(&l)
-                    if type_str != "" {
-                        result.own_variables[strings.clone(name)] = type_str
-                        raw_val := after.text if after.kind == .String_Literal else strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
-                        if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
-                        if raw_val != "" { result.own_constants[strings.clone(name)] = strings.clone(raw_val) }
+                if type_str != "" {
+                    for i in 0..<len(names) {
+                        result.own_variables[strings.clone(names[i])]     = type_str
+                        result.own_variable_locs[strings.clone(names[i])] = locs[i]
                     }
                 }
                 continue
             }
 
-            type_parts  := make([dynamic]string, context.temp_allocator)
-            start_line  := type_tok.line
+            if type_tok.kind == .Colon {
+                lexer_next(&l)
+                parse_decl_rhs(&l, names[0], locs[0], &result)
+                continue
+            }
+
+            type_parts := make([dynamic]string, context.temp_allocator)
+            start_line := type_tok.line
             depth := 0
             for {
                 pk := lexer_peek(&l)
@@ -499,14 +560,23 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
             type_str := strings.join(type_parts[:], "")
 
             if type_str != "" && !is_keyword(type_str) {
-                result.own_variables[strings.clone(name)] = type_str
+                raw_val : string
                 if lexer_peek(&l).kind == .Colon {
                     lexer_next(&l)
-                    val_tok := lexer_peek(&l)
-                    raw_val := val_tok.text if val_tok.kind == .String_Literal else strings.trim_right(l.src[l.pos:], " \t\r\n")
-                    if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
-                    if raw_val != "" { result.own_constants[strings.clone(name)] = strings.clone(raw_val) }
+                    val_tok  := lexer_peek(&l)
                     skip_to_next_statement(&l)
+                    if val_tok.kind == .String_Literal {
+                        raw_val = val_tok.text
+                    } else if val_tok.kind == .Identifier || val_tok.kind == .Other {
+                        rhs_start := uintptr(raw_data(val_tok.text)) - uintptr(raw_data(l.src))
+                        raw_val = strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                        if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
+                    }
+                }
+                for i in 0..<len(names) {
+                    result.own_variables[strings.clone(names[i])]     = type_str
+                    result.own_variable_locs[strings.clone(names[i])] = locs[i]
+                    if raw_val != "" { result.own_constants[strings.clone(names[i])] = strings.clone(raw_val) }
                 }
             }
         }
@@ -526,9 +596,17 @@ parse_struct_body :: proc(l: ^Lexer) -> Struct_Definition {
         case .EOF:         return defn
         case .Open_Brace:  depth += 1
         case .Close_Brace: depth -= 1
+        case .Hash:        if lexer_peek(l).kind == .Identifier { lexer_next(l) }
         case .Identifier:
             if depth != 1 { continue }
-            field_name := tok.text
+            names := make([dynamic]string, context.temp_allocator)
+            append(&names, tok.text)
+            for lexer_peek(l).kind == .Comma {
+                lexer_next(l)
+                next := lexer_peek(l)
+                if next.kind != .Identifier { break }
+                append(&names, lexer_next(l).text)
+            }
             if lexer_peek(l).kind != .Colon { continue }
             lexer_next(l)
 
@@ -537,10 +615,12 @@ parse_struct_body :: proc(l: ^Lexer) -> Struct_Definition {
             })
             if lexer_peek(l).kind == .Comma { lexer_next(l) }
 
-            append(&defn.fields, Struct_Field{
-                name = strings.clone(field_name),
-                type = field_type,
-            })
+            for field_name in names {
+                append(&defn.fields, Struct_Field{
+                    name = strings.clone(field_name),
+                    type = field_type,
+                })
+            }
         case:
         }
     }
@@ -567,9 +647,22 @@ parse_enum_body :: proc(l: ^Lexer) -> Enum_Definition {
     }
 }
 
+parse_union_body :: proc(l: ^Lexer) -> Union_Definition {
+    defn := Union_Definition{variants = make([dynamic]string)}
+    for { tok := lexer_next(l); if tok.kind == .EOF { return defn }; if tok.kind == .Open_Brace { break } }
+    for {
+        if lexer_peek(l).kind == .EOF || lexer_peek(l).kind == .Close_Brace { lexer_next(l); return defn }
+        variant := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
+            return k == .EOF || k == .Comma || k == .Close_Brace
+        })
+        if variant != "" { append(&defn.variants, variant) }
+        if lexer_peek(l).kind == .Comma { lexer_next(l) }
+    }
+}
+
 type_list_is_named :: proc(l: ^Lexer) -> bool {
-    saved_pos, saved_line, saved_col, saved_mode := l.pos, l.line, l.col, l.mode
-    defer { l.pos = saved_pos; l.line = saved_line; l.col = saved_col; l.mode = saved_mode }
+    pos, line, col, in_block, has_peek, peek_tok := l.pos, l.line, l.col, l.in_block, l.has_peek, l.peek_tok
+    defer { l.pos = pos; l.line = line; l.col = col; l.in_block = in_block; l.has_peek = has_peek; l.peek_tok = peek_tok }
 
     depth := 0
     for {
@@ -587,8 +680,7 @@ type_list_is_named :: proc(l: ^Lexer) -> bool {
 parse_bare_type_list :: proc(l: ^Lexer) -> [dynamic]string {
     types := make([dynamic]string)
     for {
-        parts := make([dynamic]string, context.allocator)
-        defer delete(parts)
+        sb := strings.builder_make(context.allocator)
         depth := 0
         for {
             pk := lexer_peek(l)
@@ -599,9 +691,9 @@ parse_bare_type_list :: proc(l: ^Lexer) -> [dynamic]string {
                 depth -= 1
             }
             if depth == 0 && pk.kind == .Comma { break }
-            append(&parts, lexer_next(l).text)
+            strings.write_string(&sb, lexer_next(l).text)
         }
-        if joined := strings.join(parts[:], ""); joined != "" { append(&types, joined) }
+        if s := strings.to_string(sb); s != "" { append(&types, s) }
         if lexer_peek(l).kind == .Comma { lexer_next(l); continue }
         return types
     }
@@ -612,25 +704,28 @@ parse_type_list :: proc(l: ^Lexer) -> [dynamic]string {
 
     types := make([dynamic]string)
     for {
+        name_count := 0
         for {
             pk := lexer_peek(l)
             if pk.kind == .EOF { return types }
             if pk.kind == .Other && pk.text == ")" { return types }
             if pk.kind == .Colon { break }
+            if pk.kind == .Identifier { name_count += 1 }
             lexer_next(l)
         }
         lexer_next(l)
 
-        parts := make([dynamic]string, context.allocator)
-        defer delete(parts)
+        sb := strings.builder_make(context.allocator)
         for {
             pk := lexer_peek(l)
             if pk.kind == .EOF { break }
             if pk.kind == .Other && (pk.text == ")" || pk.text == "=") { break }
             if pk.kind == .Comma { break }
-            append(&parts, lexer_next(l).text)
+            strings.write_string(&sb, lexer_next(l).text)
         }
-        if joined := strings.join(parts[:], ""); joined != "" { append(&types, joined) }
+        if s := strings.to_string(sb); s != "" {
+            for _ in 0..<max(name_count, 1) { append(&types, s) }
+        }
 
         if lexer_peek(l).kind == .Comma { lexer_next(l) }
     }
@@ -655,15 +750,15 @@ parse_proc_signature :: proc(l: ^Lexer) -> Proc_Definition {
             defn.returns = parse_type_list(l)
             if lexer_peek(l).kind == .Other && lexer_peek(l).text == ")" { lexer_next(l) }
         } else {
-            parts := make([dynamic]string, context.allocator)
-            defer delete(parts)
+			arrow_line := lexer_peek(l).line
+            sb := strings.builder_make(context.allocator)
             for {
                 pk := lexer_peek(l)
-                if pk.kind == .EOF || pk.kind == .Open_Brace { break }
-                if pk.kind == .Other && (pk.text == "-" || pk.text == "#") { break }
-                append(&parts, lexer_next(l).text)
+                if pk.kind == .EOF || pk.kind == .Open_Brace || pk.line > arrow_line { break }
+                if pk.kind == .Hash || (pk.kind == .Other && pk.text == "-") { break }
+                strings.write_string(&sb, lexer_next(l).text)
             }
-            if joined := strings.join(parts[:], ""); joined != "" { append(&defn.returns, joined) }
+            if s := strings.to_string(sb); s != "" { append(&defn.returns, s) }
         }
     }
 
@@ -680,7 +775,7 @@ get_odin_root :: proc() -> (string, bool) {
     env, found := os.lookup_env_alloc("ODIN_ROOT", context.allocator)
     if found && env != "" {
         root := env
-        if root[len(root) - 1] == '/' { root = root[:len(root) - 1] }
+        if root[len(root)-1] == '/' { root = root[:len(root)-1] }
         g_odin_root = strings.clone(root)
         delete(env)
         return g_odin_root, true
@@ -692,7 +787,7 @@ get_odin_root :: proc() -> (string, bool) {
     delete(stderr)
 
     root := strings.trim_space(string(stdout))
-    if len(root) > 0 && root[len(root) - 1] == '/' { root = root[:len(root) - 1] }
+    if len(root) > 0 && root[len(root)-1] == '/' { root = root[:len(root)-1] }
     g_odin_root = strings.clone(root)
     delete(stdout)
     return g_odin_root, true
@@ -705,7 +800,7 @@ resolve_import_to_dir :: proc(import_path: string, source_dir: string) -> (strin
     if colon != -1 {
         root, ok := get_odin_root()
         if !ok { return "", false }
-        return strings.concatenate({root, "/", import_path[:colon], "/", import_path[colon + 1:]}), true
+        return strings.concatenate({root, "/", import_path[:colon], "/", import_path[colon+1:]}), true
     }
 
     return strings.concatenate({source_dir, "/", import_path}), true
@@ -720,6 +815,7 @@ load_package_symbols :: proc(package_dir: string) {
     pkg := Package_Symbols{
         structs   = make(map[string]Struct_Definition),
         enums     = make(map[string]Enum_Definition),
+        unions    = make(map[string]Union_Definition),
         procs     = make(map[string]Proc_Definition),
         variables = make(map[string]string),
     }
@@ -749,6 +845,7 @@ load_package_symbols :: proc(package_dir: string) {
 
         for k, &s in file_result.own_structs   { pkg.structs[k]  = s }
         for k, &e in file_result.own_enums     { pkg.enums[k]    = e }
+        for k, &u in file_result.own_unions    { pkg.unions[k]   = u }
         for k, &p in file_result.own_procs     { pkg.procs[k]    = p }
         for k,  v in file_result.own_variables { type_aliases[k] = v }
     }
@@ -804,9 +901,7 @@ register_package_into_index :: proc(idx: ^Project_Index, alias: string, package_
                 append(&idx.imported_struct_conflicts[name], strings.clone(alias))
             } else {
                 found := false
-                for existing in idx.imported_struct_conflicts[name] {
-                    if existing == alias { found = true; break }
-                }
+                for existing in idx.imported_struct_conflicts[name] { if existing == alias { found = true; break } }
                 if !found { append(&idx.imported_struct_conflicts[name], strings.clone(alias)) }
             }
         }
@@ -826,9 +921,7 @@ register_package_into_index :: proc(idx: ^Project_Index, alias: string, package_
                 append(&idx.imported_enum_conflicts[name], strings.clone(alias))
             } else {
                 found := false
-                for existing in idx.imported_enum_conflicts[name] {
-                    if existing == alias { found = true; break }
-                }
+                for existing in idx.imported_enum_conflicts[name] { if existing == alias { found = true; break } }
                 if !found { append(&idx.imported_enum_conflicts[name], strings.clone(alias)) }
             }
         }
@@ -856,31 +949,30 @@ index_one_file :: proc(path: string, src: string) -> File_Parse_Result {
     arena_reset(arena)
 
     outer := context.allocator
-    context.allocator = virtual.arena_allocator(arena)
-    scratch := parse_source_file(path, src)
+    context.allocator = g_persistent_allocator
+    result := parse_source_file(path, src)
     context.allocator = outer
 
-    context.allocator = g_persistent_allocator
     syms := File_Symbol_Names{
         struct_names   = make([dynamic]string),
         enum_names     = make([dynamic]string),
+        union_names    = make([dynamic]string),
         proc_names     = make([dynamic]string),
         variable_names = make([dynamic]string),
         import_aliases = make(map[string]string),
+        basename       = path_basename(strings.clone(path)),
     }
-    for name in scratch.own_structs    { append(&syms.struct_names,   strings.clone(name)) }
-    for name in scratch.own_enums      { append(&syms.enum_names,     strings.clone(name)) }
-    for name in scratch.own_procs      { append(&syms.proc_names,     strings.clone(name)) }
-    for name in scratch.own_variables  { append(&syms.variable_names, strings.clone(name)) }
-    for alias, imp in scratch.import_aliases {
+    for name in result.own_structs    { append(&syms.struct_names,   strings.clone(name)) }
+    for name in result.own_enums      { append(&syms.enum_names,     strings.clone(name)) }
+    for name in result.own_unions     { append(&syms.union_names,    strings.clone(name)) }
+    for name in result.own_procs      { append(&syms.proc_names,     strings.clone(name)) }
+    for name in result.own_variables  { append(&syms.variable_names, strings.clone(name)) }
+    for alias, imp in result.import_aliases {
         syms.import_aliases[strings.clone(alias)] = strings.clone(imp)
     }
     g_file_symbols[path] = syms
 
-    persistent := parse_source_file(path, src)
-    context.allocator = outer
-
-    return persistent
+    return result
 }
 
 index_directory :: proc(idx: ^Project_Index, dir_path: string) -> bool {
@@ -916,7 +1008,7 @@ index_project_tree :: proc(project_root: string) -> (Project_Index, [dynamic]str
     append(&dir_stack, strings.clone(project_root, context.allocator))
 
     for len(dir_stack) > 0 {
-        current := dir_stack[len(dir_stack) - 1]
+        current := dir_stack[len(dir_stack)-1]
         pop(&dir_stack)
 
         if index_directory(&idx, current) { append(&visited_dirs, strings.clone(current, context.allocator)) }
@@ -939,16 +1031,18 @@ index_project_tree :: proc(project_root: string) -> (Project_Index, [dynamic]str
 }
 
 merge_file_into_index :: proc(idx: ^Project_Index, file_result: ^File_Parse_Result) {
-    for k, &s in file_result.own_structs    { idx.own_structs[k]    = s }
-    for k, &e in file_result.own_enums      { idx.own_enums[k]      = e }
-    for k,  v in file_result.own_procs      { idx.own_procs[k]      = v }
-    for k,  v in file_result.own_variables  { idx.own_variables[k]  = v }
-    for k,  v in file_result.own_constants  { idx.own_constants[k]  = v }
-    for k,  v in file_result.import_aliases { idx.import_aliases[k] = v }
+    for k, &s in file_result.own_structs    { idx.own_structs[k]        = s }
+    for k, &e in file_result.own_enums      { idx.own_enums[k]          = e }
+    for k, &u in file_result.own_unions     { idx.own_unions[k]         = u }
+    for k,  v in file_result.own_procs      { idx.own_procs[k]          = v }
+    for k,  v in file_result.own_variables  { idx.own_variables[k]      = v }
+    for k,  v in file_result.own_variable_locs { idx.own_variable_locs[k] = v }
+    for k,  v in file_result.own_constants  { idx.own_constants[k]      = v }
+    for k,  v in file_result.import_aliases { idx.import_aliases[k]     = v }
 }
 
 path_parent_dir :: proc(file_path: string, allocator := context.allocator) -> string {
-    for i := len(file_path) - 1; i >= 0; i -= 1 {
+    for i := len(file_path)-1; i >= 0; i -= 1 {
         if file_path[i] == '/' {
             if i == 0 { return strings.clone("/", allocator) }
             return strings.clone(file_path[:i], allocator)
@@ -957,17 +1051,26 @@ path_parent_dir :: proc(file_path: string, allocator := context.allocator) -> st
     return strings.clone(".", allocator)
 }
 
+path_basename :: proc(path: string) -> string {
+    for i := len(path)-1; i >= 0; i -= 1 {
+        if path[i] == '/' { return path[i+1:] }
+    }
+    return path
+}
+
 project_index_destroy :: proc(idx: ^Project_Index) {
     delete(idx.own_structs)
     delete(idx.own_enums)
+    delete(idx.own_unions)
     delete(idx.own_procs)
     delete(idx.own_variables)
+    delete(idx.own_variable_locs)
     delete(idx.own_constants)
     delete(idx.import_aliases)
     delete(idx.all_imported_structs)
     delete(idx.all_imported_enums)
 
-    for k, v in idx.imported_package_dirs    { delete(k); delete(v) }
+    for k, v in idx.imported_package_dirs   { delete(k); delete(v) }
     delete(idx.imported_package_dirs)
 
     for k, v in idx.imported_struct_sources  { delete(k); delete(v) }
@@ -1016,8 +1119,9 @@ reindex_from_content :: proc(path: string, was_cached: bool, src: []u8) {
     if old_syms, ok := g_file_symbols[p]; ok {
         for name in old_syms.struct_names   { delete_key(&g_index.own_structs,   name) }
         for name in old_syms.enum_names     { delete_key(&g_index.own_enums,     name) }
+        for name in old_syms.union_names    { delete_key(&g_index.own_unions,    name) }
         for name in old_syms.proc_names     { delete_key(&g_index.own_procs,     name) }
-        for name in old_syms.variable_names { delete_key(&g_index.own_variables, name); delete_key(&g_index.own_constants, name) }
+        for name in old_syms.variable_names { delete_key(&g_index.own_variables, name); delete_key(&g_index.own_variable_locs, name); delete_key(&g_index.own_constants, name) }
     }
 
     file_result := index_one_file(p, string(src))
@@ -1083,7 +1187,7 @@ rebuild_index_from_buf :: proc(path: string, src: string) {
 
 split_at_dot :: proc(name: string) -> (before, after: string, found: bool) {
     for i := 0; i < len(name); i += 1 {
-        if name[i] == '.' { return name[:i], name[i + 1:], true }
+        if name[i] == '.' { return name[:i], name[i+1:], true }
     }
     return "", "", false
 }
@@ -1123,6 +1227,7 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
         if tok.kind == .EOF { break }
         if tok.kind == .Open_Brace  { brace_depth += 1; continue }
         if tok.kind == .Close_Brace { if brace_depth > 0 { brace_depth -= 1 }; continue }
+        if tok.kind == .Hash { if lexer_peek(&l).kind == .Identifier { lexer_next(&l) }; continue }
         if tok.kind == .Other {
             if tok.text == "(" { paren_depth += 1 }
             if tok.text == ")" && paren_depth > 0 { paren_depth -= 1 }
@@ -1133,23 +1238,40 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
         name := tok.text
         if is_keyword(name) { continue }
 
+        names := make([dynamic]string, context.temp_allocator)
+        append(&names, name)
+        for lexer_peek(&l).kind == .Comma {
+            lexer_next(&l)
+            nxt := lexer_peek(&l)
+            if nxt.kind != .Identifier { break }
+            n := lexer_next(&l)
+            if is_keyword(n.text) { break }
+            append(&names, n.text)
+        }
+
         next := lexer_peek(&l)
 
         if next.kind == .Double_Colon {
             lexer_next(&l)
             after := lexer_peek(&l)
-            if after.kind == .Identifier && after.text != "struct" && after.text != "enum" && after.text != "proc" {
+            if after.kind == .Identifier && after.text != "struct" && after.text != "enum" && after.text != "proc" && after.text != "union" {
                 type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
                     return k == .EOF || k == .Comma || k == .Open_Brace
                 })
                 if type_str != "" { vars[strings.clone(name)] = type_str }
             } else if after.kind == .String_Literal || after.kind == .Other {
-                rhs_start := l.pos
-                type_str  := peek_rhs_type(&l)
+                type_str := peek_rhs_type(&l)
                 if type_str != "" {
                     vars[strings.clone(name)] = type_str
                     if consts != nil {
-                        raw_val := after.text if after.kind == .String_Literal else strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                        raw_val : string
+                        if after.kind == .String_Literal {
+                            raw_val = after.text
+                        } else {
+                            rhs_start := uintptr(raw_data(after.text)) - uintptr(raw_data(l.src))
+                            raw_val = strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                            if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
+                        }
                         if raw_val != "" { consts[strings.clone(name)] = strings.clone(raw_val) }
                     }
                 }
@@ -1164,28 +1286,33 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
             if type_tok.kind == .Other && type_tok.text == "=" {
                 lexer_next(&l)
                 type_str := peek_rhs_type(&l)
-                if type_str != "" { vars[strings.clone(name)] = type_str }
+                if type_str != "" { for n in names { vars[strings.clone(n)] = type_str } }
                 continue
             }
 
             if type_tok.kind == .Colon {
                 lexer_next(&l)
                 after := lexer_peek(&l)
-                if after.kind == .Identifier && (after.text == "struct" || after.text == "enum" || after.text == "proc") {
+                if after.kind == .Identifier && (after.text == "struct" || after.text == "enum" || after.text == "proc" || after.text == "union") {
                 } else if after.kind == .String_Literal || after.kind == .Other {
-                    rhs_start := l.pos
-                    type_str  := peek_rhs_type(&l)
+                    type_str := peek_rhs_type(&l)
                     if type_str != "" {
-                        vars[strings.clone(name)] = type_str
+                        for n in names { vars[strings.clone(n)] = type_str }
                         if consts != nil {
-                            raw_val := after.text if after.kind == .String_Literal else strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
-                            if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
-                            if raw_val != "" { consts[strings.clone(name)] = strings.clone(raw_val) }
+                            raw_val : string
+                            if after.kind == .String_Literal {
+                                raw_val = after.text
+                            } else {
+                                rhs_start := uintptr(raw_data(after.text)) - uintptr(raw_data(l.src))
+                                raw_val = strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                                if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
+                            }
+                            if raw_val != "" { for n in names { consts[strings.clone(n)] = strings.clone(raw_val) } }
                         }
                     }
                 } else if after.kind == .Identifier {
                     type_str := peek_rhs_type(&l)
-                    if type_str != "" { vars[strings.clone(name)] = type_str }
+                    if type_str != "" { for n in names { vars[strings.clone(n)] = type_str } }
                 }
                 continue
             }
@@ -1207,14 +1334,20 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
             type_str := strings.join(type_parts[:], "")
 
             if type_str != "" && !is_keyword(type_str) {
-                vars[strings.clone(name)] = type_str
+                for n in names { vars[strings.clone(n)] = type_str }
                 if consts != nil && lexer_peek(&l).kind == .Colon {
                     lexer_next(&l)
-                    val_tok := lexer_peek(&l)
-                    raw_val := val_tok.text if val_tok.kind == .String_Literal else strings.trim_right(l.src[l.pos:], " \t\r\n")
-                    if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
-                    if raw_val != "" { consts[strings.clone(name)] = strings.clone(raw_val) }
+                    val_tok   := lexer_peek(&l)
                     skip_to_next_statement(&l)
+                    raw_val : string
+                    if val_tok.kind == .String_Literal {
+                        raw_val = val_tok.text
+                    } else if val_tok.kind == .Identifier || val_tok.kind == .Other {
+                        rhs_start := uintptr(raw_data(val_tok.text)) - uintptr(raw_data(l.src))
+                        raw_val = strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                        if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
+                    }
+                    if raw_val != "" { for n in names { consts[strings.clone(n)] = strings.clone(raw_val) } }
                 }
             }
         }
@@ -1254,14 +1387,21 @@ param_type_from_sig :: proc(sig: string, var_name: string) -> (string, bool) {
             continue
         }
         if tok.kind != .Identifier || depth == 0 { continue }
-        if tok.text != var_name { continue }
-        next := lexer_peek(&l)
-        if next.kind != .Colon { continue }
+        names := make([dynamic]string, context.temp_allocator)
+        append(&names, tok.text)
+        for lexer_peek(&l).kind == .Comma {
+            lexer_next(&l)
+            nxt := lexer_peek(&l)
+            if nxt.kind != .Identifier { break }
+            append(&names, lexer_next(&l).text)
+        }
+        if lexer_peek(&l).kind != .Colon { continue }
         lexer_next(&l)
         type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
-            return k == .EOF || k == .Comma || k == .Other && (t == ")" || t == "=")
+            return k == .EOF || k == .Comma || (k == .Other && (t == ")" || t == "="))
         })
-        if type_str != "" { return type_str, true }
+        if type_str == "" { continue }
+        for n in names { if n == var_name { return type_str, true } }
     }
     return "", false
 }
@@ -1274,7 +1414,7 @@ format_struct :: proc(name: string, defn: Struct_Definition) -> string {
     for f in defn.fields {
         strings.write_string(&sb, indent_spaces)
         strings.write_string(&sb, f.name)
-        for _ in 0 ..< max_len - len(f.name) { strings.write_byte(&sb, ' ') }
+        for _ in 0..<max_len-len(f.name) { strings.write_byte(&sb, ' ') }
         strings.write_byte(&sb, ' ')
         strings.write_string(&sb, f.type); strings.write_byte(&sb, '\n')
     }
@@ -1285,6 +1425,15 @@ format_enum :: proc(name: string, defn: Enum_Definition) -> string {
     sb := strings.builder_make()
     strings.write_string(&sb, name); strings.write_string(&sb, " enum\n")
     for v in defn.values {
+        strings.write_string(&sb, indent_spaces); strings.write_string(&sb, v); strings.write_byte(&sb, '\n')
+    }
+    return strings.to_string(sb)
+}
+
+format_union :: proc(name: string, defn: Union_Definition) -> string {
+    sb := strings.builder_make()
+    strings.write_string(&sb, name); strings.write_string(&sb, " union\n")
+    for v in defn.variants {
         strings.write_string(&sb, indent_spaces); strings.write_string(&sb, v); strings.write_byte(&sb, '\n')
     }
     return strings.to_string(sb)
@@ -1314,12 +1463,14 @@ hover_for_type :: proc(type_name: string) -> string {
     lookup := strings.trim_prefix(type_name, "^")
     if d, found := g_index.own_structs[lookup];          found { return format_struct(type_name, d) }
     if d, found := g_index.own_enums[lookup];            found { return format_enum(type_name, d)   }
+    if d, found := g_index.own_unions[lookup];           found { return format_union(type_name, d)  }
     if d, found := g_index.all_imported_structs[lookup]; found { return format_struct(type_name, d) }
     if d, found := g_index.all_imported_enums[lookup];   found { return format_enum(type_name, d)   }
     if alias, name, has_dot := split_at_dot(lookup); has_dot {
         if pkg := package_by_alias(alias); pkg != nil {
             if d, found := pkg.structs[name];   found { return format_struct(type_name, d)          }
             if d, found := pkg.enums[name];     found { return format_enum(type_name, d)            }
+            if d, found := pkg.unions[name];    found { return format_union(type_name, d)           }
             if t, found := pkg.variables[name]; found { return fmt.tprintf("%s %s", type_name, t) }
         }
     }
@@ -1352,6 +1503,7 @@ qualifier_from_ctx :: proc(local_ctx: string, symbol: string) -> string {
 hover_info :: proc(symbol: string, local_ctx: string) -> string {
     if d, ok := g_index.own_structs[symbol]; ok { return format_struct(symbol, d) }
     if d, ok := g_index.own_enums[symbol];   ok { return format_enum(symbol, d)   }
+    if d, ok := g_index.own_unions[symbol];  ok { return format_union(symbol, d)  }
     if d, ok := g_index.own_procs[symbol];   ok { return format_proc(symbol, d)   }
 
     if symbol in g_index.imported_struct_conflicts || symbol in g_index.imported_enum_conflicts {
@@ -1420,7 +1572,9 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
 goto_def :: proc(symbol: string, local_ctx: string) -> (file: string, line: int, col: int, ok: bool) {
     if d, found := g_index.own_structs[symbol]; found { loc := d.location; return loc.file, loc.line, loc.col, true }
     if d, found := g_index.own_enums[symbol];   found { loc := d.location; return loc.file, loc.line, loc.col, true }
+    if d, found := g_index.own_unions[symbol];  found { loc := d.location; return loc.file, loc.line, loc.col, true }
     if d, found := g_index.own_procs[symbol];   found { loc := d.location; return loc.file, loc.line, loc.col, true }
+    if loc, found := g_index.own_variable_locs[symbol]; found { return loc.file, loc.line, loc.col, true }
     if symbol in g_index.imported_struct_conflicts { return "", 0, 0, false }
     if symbol in g_index.imported_enum_conflicts   { return "", 0, 0, false }
     if d, found := g_index.all_imported_structs[symbol]; found { loc := d.location; return loc.file, loc.line, loc.col, true }
@@ -1448,25 +1602,19 @@ completions_from_package :: proc(alias: string, prefix: string) -> string {
     return strings.trim_right(strings.to_string(sb), "\n")
 }
 
-Completion_Kind :: enum { Own_Variable, Own_Enum, Own_Proc, Own_Struct, Imported_Enum, Imported_Struct }
-
-path_basename :: proc(path: string) -> string {
-    for i := len(path) - 1; i >= 0; i -= 1 {
-        if path[i] == '/' { return path[i+1:] }
-    }
-    return path
-}
+Completion_Kind :: enum { Own_Variable, Own_Enum, Own_Union, Own_Proc, Own_Struct, Imported_Enum, Imported_Struct }
 
 completions_unqualified :: proc(prefix: string, current_file: string) -> string {
     current_basename := path_basename(current_file)
 
-    own_symbol_file := make(map[string]string, context.temp_allocator)
-    for path, syms in g_file_symbols {
-        basename := path_basename(path)
-        for name in syms.struct_names   { own_symbol_file[name] = basename }
-        for name in syms.enum_names     { own_symbol_file[name] = basename }
-        for name in syms.proc_names     { own_symbol_file[name] = basename }
-        for name in syms.variable_names { own_symbol_file[name] = basename }
+    symbol_basename := proc(name: string) -> string {
+        for _, syms in g_file_symbols {
+            for n in syms.struct_names   { if n == name { return syms.basename } }
+            for n in syms.enum_names     { if n == name { return syms.basename } }
+            for n in syms.proc_names     { if n == name { return syms.basename } }
+            for n in syms.variable_names { if n == name { return syms.basename } }
+        }
+        return ""
     }
 
     conflict_source :: proc(name: string, is_struct: bool) -> string {
@@ -1501,19 +1649,23 @@ completions_unqualified :: proc(prefix: string, current_file: string) -> string 
         if !strings.has_prefix(name, prefix) { continue }
         types := make([dynamic]string, context.temp_allocator)
         for f in defn.fields { append(&types, f.type) }
-        add(&lines, current_basename, name, own_symbol_file[name], strings.join(types[:], " "), .Own_Struct)
+        add(&lines, current_basename, name, symbol_basename(name), strings.join(types[:], " "), .Own_Struct)
     }
     for name, defn in g_index.own_enums {
         if !strings.has_prefix(name, prefix) { continue }
-        add(&lines, current_basename, name, own_symbol_file[name], strings.join(defn.values[:], " "), .Own_Enum)
+        add(&lines, current_basename, name, symbol_basename(name), strings.join(defn.values[:], " "), .Own_Enum)
+    }
+    for name, defn in g_index.own_unions {
+        if !strings.has_prefix(name, prefix) { continue }
+        add(&lines, current_basename, name, symbol_basename(name), strings.join(defn.variants[:], " "), .Own_Union)
     }
     for name, defn in g_index.own_procs {
         if !strings.has_prefix(name, prefix) { continue }
-        add(&lines, current_basename, name, own_symbol_file[name], proc_signature_summary(defn), .Own_Proc)
+        add(&lines, current_basename, name, symbol_basename(name), proc_signature_summary(defn), .Own_Proc)
     }
     for name, type_name in g_index.own_variables {
         if !strings.has_prefix(name, prefix) { continue }
-        add(&lines, current_basename, name, own_symbol_file[name], type_name, .Own_Variable)
+        add(&lines, current_basename, name, symbol_basename(name), type_name, .Own_Variable)
     }
     for name in g_index.all_imported_structs {
         if !strings.has_prefix(name, prefix) || name in g_index.own_structs { continue }
@@ -1628,7 +1780,7 @@ MAX_FRAME_BYTES :: 4 * 1024 * 1024
 fd_read_exactly :: proc(fd: posix.FD, buf: []u8) -> bool {
     total := 0
     for total < len(buf) {
-        n := posix.read(fd, &buf[total], uint(len(buf)) - uint(total))
+        n := posix.read(fd, &buf[total], uint(len(buf))-uint(total))
         if n <= 0 { return false }
         total += n
     }
@@ -1638,7 +1790,7 @@ fd_read_exactly :: proc(fd: posix.FD, buf: []u8) -> bool {
 fd_write_all :: proc(fd: posix.FD, buf: []u8) -> bool {
     total := 0
     for total < len(buf) {
-        n := posix.write(fd, &buf[total], uint(len(buf)) - uint(total))
+        n := posix.write(fd, &buf[total], uint(len(buf))-uint(total))
         if n <= 0 { return false }
         total += n
     }
@@ -1650,11 +1802,11 @@ INLINE_FRAME_CAP :: 4096
 write_frame :: proc(fd: posix.FD, msg: string) -> bool {
     body := transmute([]u8)msg
     n    := len(body)
-    if n + 8 <= INLINE_FRAME_CAP {
+    if n+8 <= INLINE_FRAME_CAP {
         buf: [INLINE_FRAME_CAP]u8
         fmt.bprintf(buf[:8], "%08x", n)
         copy(buf[8:], body)
-        return fd_write_all(fd, buf[:8 + n])
+        return fd_write_all(fd, buf[:8+n])
     }
     hdr_str := fmt.tprintf("%08x", n)
     hdr  := transmute([]u8)hdr_str
@@ -1784,11 +1936,9 @@ handle_client :: proc(client_fd: posix.FD) {
             result := hover_info(sym, local_ctx)
             write_frame(client_fd, result)
 
-		case "goto":
-            sym,       sym_ok := read_frame(client_fd, context.temp_allocator)
-            if !sym_ok { return }
-            local_ctx, ctx_ok := read_frame(client_fd, context.temp_allocator)
-            if !ctx_ok { return }
+        case "goto":
+            sym,       sym_ok := read_frame(client_fd, context.temp_allocator); if !sym_ok { return }
+            local_ctx, ctx_ok := read_frame(client_fd, context.temp_allocator); if !ctx_ok { return }
 
             context.allocator = context.temp_allocator
             file, line, col, ok := goto_def(sym, local_ctx)
@@ -1799,17 +1949,14 @@ handle_client :: proc(client_fd: posix.FD) {
             }
 
         case "index":
-            path, path_ok := read_frame(client_fd, context.temp_allocator)
-            if !path_ok { return }
+            path, path_ok := read_frame(client_fd, context.temp_allocator); if !path_ok { return }
             context.allocator = g_persistent_allocator
             rebuild_index(path)
             write_frame(client_fd, "")
 
         case "index_buf":
-            path, path_ok := read_frame(client_fd, context.temp_allocator)
-            if !path_ok { return }
-            src, src_ok := read_frame(client_fd, context.temp_allocator)
-            if !src_ok { return }
+            path, path_ok := read_frame(client_fd, context.temp_allocator); if !path_ok { return }
+            src, src_ok   := read_frame(client_fd, context.temp_allocator); if !src_ok  { return }
             context.allocator = g_persistent_allocator
             rebuild_index_from_buf(path, src)
             write_frame(client_fd, "")
@@ -1830,7 +1977,7 @@ main :: proc() {
         arg := os.args[i]
         if arg == "--daemon" {
             daemon_mode = true
-            if i + 1 < len(os.args) {
+            if i+1 < len(os.args) {
                 filepath = os.args[i+1]
                 i += 1
             }
