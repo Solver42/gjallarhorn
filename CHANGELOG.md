@@ -1,3 +1,15 @@
+## 31
+
+### Added
+
+- Different infered types on same walrus operator
+- Infer float, rune, complex number, and quaternion types
+
+### Fixed
+
+- Hover in dirty buffers
+- Resolve duplicate names between package-level and local scope
+
 ## 30
 
 ### Added
@@ -10,7 +22,7 @@
 - #type
 - Backtick strings
 
-### Changed
+### Fixed
 
 - Faster parsing on large files
 - Lower memory usage during parsing
@@ -55,7 +67,7 @@
 
 ## 24
 
-### Changed
+### Fixed
 
 - Cleaner hovers
 

@@ -243,15 +243,9 @@ function! gjallarhorn#goto_definition() abort
     let l:fp = expand('%:p')
     call s:request(l:fp, ['index_buf', l:fp, join(getline(1, '$'), "\n")])
     let [l:sig_line, l:ctx] = s:local_ctx()
-    let l:resp = s:request(l:fp, ['goto', l:word, l:ctx])
+    let l:resp = s:request(l:fp, ['goto', l:word, l:ctx, string(l:sig_line), l:fp])
     if l:resp ==# ''
-        let l:col = match(getline(l:sig_line), '\<' . l:word . '\>') + 1
-        if l:col > 0
-            normal! m'
-            call cursor(l:sig_line, l:col)
-        else
-            silent! normal! gd
-        endif
+        silent! normal! gd
         return
     endif
     let l:parts = split(l:resp, "\x00")
@@ -274,5 +268,5 @@ augroup gjallarhorn
     autocmd BufWritePost *.odin
         \ call gjallarhorn#index_async(expand('<afile>:p'))
     autocmd CursorHold,CursorHoldI *.odin
-        \ if &modified | call gjallarhorn#index_buf_async(expand('%:p')) | endif
+        \ call gjallarhorn#index_buf_async(expand('%:p'))
 augroup END

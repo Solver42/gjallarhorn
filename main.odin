@@ -312,6 +312,19 @@ skip_to_next_statement :: proc(l: ^Lexer) {
     }
 }
 
+skip_rhs_value :: proc(l: ^Lexer) {
+    start_line := l.line
+    depth := 0
+    for {
+        pk := lexer_peek(l)
+        if pk.kind == .EOF || pk.line > start_line { return }
+        if pk.kind == .Other && pk.text == "(" { depth += 1 }
+        if pk.kind == .Other && pk.text == ")" && depth > 0 { depth -= 1 }
+        if pk.kind == .Comma && depth == 0 { return }
+        lexer_next(l)
+    }
+}
+
 write_type_until :: proc(l: ^Lexer, sb: ^strings.Builder, stop_check: proc(Token_Kind, string) -> bool, max_line := max(int)) {
     prev_was_dot := false
     for {
@@ -337,21 +350,50 @@ parse_type_until :: proc(l: ^Lexer, stop_check: proc(Token_Kind, string) -> bool
     return strings.to_string(sb)
 }
 
+infer_numeric_type :: proc(l: ^Lexer) -> string {
+    has_dot_or_e := false
+    line         := lexer_peek(l).line
+    for {
+        pk := lexer_peek(l)
+        if pk.kind == .EOF || pk.line > line { break }
+        if pk.kind == .Comma                 { break }
+        tok := lexer_next(l)
+        if tok.kind == .Identifier {
+            switch tok.text {
+            case "i":      return "complex128"
+            case "j", "k": return "quaternion256"
+            }
+        }
+        if tok.kind == .Other {
+            for b in transmute([]u8)tok.text {
+                if b == '.' || b == 'e' || b == 'E' { has_dot_or_e = true }
+            }
+        }
+    }
+    if has_dot_or_e { return "f64" }
+    return "int"
+}
+
 peek_rhs_type :: proc(l: ^Lexer) -> string {
     tok := lexer_peek(l)
-    if tok.kind == .String_Literal { skip_to_next_statement(l); return "string" }
-    if tok.kind == .Other && len(tok.text) > 0 && tok.text[0] >= '0' && tok.text[0] <= '9' { skip_to_next_statement(l); return "int" }
+    if tok.kind == .String_Literal { skip_rhs_value(l); return "string" }
+    if tok.kind == .Other && len(tok.text) > 0 {
+        if tok.text[0] >= '0' && tok.text[0] <= '9' {
+            return infer_numeric_type(l)
+        }
+        if tok.text[0] == '\'' { skip_rhs_value(l); return "rune" }
+    }
     if tok.kind == .Identifier {
         switch tok.text {
-        case "true", "false": skip_to_next_statement(l); return "bool"
-        case "nil":           skip_to_next_statement(l); return ""
+        case "true", "false": skip_rhs_value(l); return "bool"
+        case "nil":           skip_rhs_value(l); return ""
         }
     }
     type_str := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
         return k == .EOF || k == .Open_Brace || k == .Colon ||
                (k == .Other && (t == "=" || t == "("))
     }, tok.line)
-    skip_to_next_statement(l)
+    skip_rhs_value(l)
     return type_str
 }
 
@@ -527,12 +569,13 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
 
             if type_tok.kind == .Other && type_tok.text == "=" {
                 lexer_next(&l)
-                type_str := peek_rhs_type(&l)
-                if type_str != "" {
-                    for i in 0..<len(names) {
+                for i in 0..<len(names) {
+                    type_str := peek_rhs_type(&l)
+                    if type_str != "" {
                         result.own_variables[strings.clone(names[i])]     = type_str
                         result.own_variable_locs[strings.clone(names[i])] = locs[i]
                     }
+                    if i < len(names)-1 && lexer_peek(&l).kind == .Comma { lexer_next(&l) }
                 }
                 continue
             }
@@ -1285,8 +1328,11 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
 
             if type_tok.kind == .Other && type_tok.text == "=" {
                 lexer_next(&l)
-                type_str := peek_rhs_type(&l)
-                if type_str != "" { for n in names { vars[strings.clone(n)] = type_str } }
+                for i in 0..<len(names) {
+                    type_str := peek_rhs_type(&l)
+                    if type_str != "" { vars[strings.clone(names[i])] = type_str }
+                    if i < len(names)-1 && lexer_peek(&l).kind == .Comma { lexer_next(&l) }
+                }
                 continue
             }
 
@@ -1526,24 +1572,22 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
     type_name    := ""
     local_consts := make(map[string]string)
     defer delete(local_consts)
-    if t, ok := g_index.own_variables[symbol]; ok {
+    vars := parse_local_vars(local_ctx, &local_consts)
+    defer delete(vars)
+    if v, ok := local_consts[symbol]; ok { return v }
+    if t, ok := vars[symbol]; ok {
+        if defn, is_proc := g_index.own_procs[t]; is_proc && len(defn.returns) > 0 {
+            type_name = defn.returns[0]
+        } else {
+            type_name = t
+        }
+    } else if t, ok := g_index.own_variables[symbol]; ok {
         type_name = t
     } else {
-        vars := parse_local_vars(local_ctx, &local_consts)
-        defer delete(vars)
-        if v, ok := local_consts[symbol]; ok { return v }
-        if t, ok := vars[symbol]; ok {
-            if defn, is_proc := g_index.own_procs[t]; is_proc && len(defn.returns) > 0 {
-                type_name = defn.returns[0]
-            } else {
-                type_name = t
-            }
-        } else {
-            first_line := local_ctx
-            if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
-            if start := strings.index_byte(first_line, '('); start >= 0 {
-                if t, ok := param_type_from_sig(first_line[start:], symbol); ok { type_name = t }
-            }
+        first_line := local_ctx
+        if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
+        if start := strings.index_byte(first_line, '('); start >= 0 {
+            if t, ok := param_type_from_sig(first_line[start:], symbol); ok { type_name = t }
         }
     }
 
