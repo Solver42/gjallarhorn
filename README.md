@@ -5,7 +5,7 @@ It stays out of your way until you need it. If you want an IDE experience with r
 
 Why use Gjallarhorn then?
 
-- **Speed** — Hand-written lexer over a binary Unix socket. Purpose-built for completion and definitions with no AST or JSON overhead.
+- **Speed** — A custom lexer made in odin over a binary Unix socket. Purpose-built for completion and definitions with no AST or JSON overhead. Vim9 script that compiles into bytecode.
 - **Focus** — No diagnostics, no squiggly underlines, no editor trying to fix your code while you're still writing it. The compiler is the source of truth.
 - **Simplicity** — Clone, run the install script, open Vim. No dependencies, no package manager.
 
@@ -13,7 +13,7 @@ Why use Gjallarhorn then?
 
 - [Odin](https://odin-lang.org) compiler to build
 - POSIX system (macOS, Linux, BSD, etc)
-- [Vim](https://github.com/vim/vim) 8.2+
+- [Vim](https://github.com/vim/vim) 9.0+
 
 ## Install
 
@@ -35,9 +35,9 @@ cd ~/.vim/pack/plugins/start/gjallarhorn && git pull && sh install.sh
 
 ## Usage
 
-- Ctrl+X Ctrl+U: Triggers autocomplete suggestions for structs, enums, unions, type aliases, imported libraries, and chained member access (a.b.c).
-- K: Toggles a popup displaying detailed information about the symbol under the cursor, including enum values, union types, struct fields, constant values, and procedure signatures (parameters and return types).
-- gd: Jumps directly to the symbol's declaration, even if the file is not currently open in Vim.
+- **Ctrl+X Ctrl+U** triggers autocomplete suggestions for structs, enums, unions, type aliases, imported libraries, and chained member access (a.b.c).
+- **K** toggles a popup displaying detailed information about the symbol under the cursor, including enum values, union types, struct fields, constant values, and procedure signatures (parameters and return types).
+- **gd** jumps to the symbol's declaration, even if the file is not currently open in Vim.
 
 ## How it works
 

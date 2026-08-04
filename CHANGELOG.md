@@ -1,3 +1,14 @@
+## 32
+
+### Fixed
+
+- Hover in loops shows correct type
+- Hover don't show trailing , and } in struct fields
+
+## Changed
+
+- Vim9 script
+
 ## 31
 
 ### Added
