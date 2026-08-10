@@ -1,3 +1,16 @@
+## 33
+
+### Added
+
+- Autocomplete for local variables and procedure parameters
+- Handle string types in loops
+- Handle index in loops
+- Resolve variable types
+
+### Changed
+
+- Shortcut for autocomplete is now Ctrl+X Ctrl+O
+
 ## 32
 
 ### Fixed
@@ -176,7 +189,7 @@
 ### Fixed
 
 - Improved performance for hover and autocomplete
-- Hover and autocomplete work for local variables and proc parameters
+- Hover work for local variables and procedure parameters
 
 ## 12
 

@@ -186,7 +186,7 @@ export def IndexBufAsync(filepath: string)
     SendAsync(filepath, ['index_buf', filepath, getline(1, '$')->join("\n")])
 enddef
 
-export def Completefunc(findstart: number, base: string): any
+export def Completion(findstart: number, base: string): any
     if findstart
         var col_idx = col('.') - 1
         var text    = getline('.')
@@ -273,8 +273,9 @@ enddef
 
 export def SetupOdinBuffer()
     EnsureDaemon(expand('<afile>:p'))
-    setlocal completefunc=gjallarhorn#Completefunc
+    setlocal omnifunc=gjallarhorn_core#Completion
     IndexAsync(expand('<afile>:p'))
-    nnoremap <buffer> <silent> K  <cmd>call gjallarhorn#ToggleHover()<CR>
-    nnoremap <buffer> <silent> gd <cmd>call gjallarhorn#GotoDefinition()<CR>
+    nnoremap <buffer> <silent> K  <cmd>call gjallarhorn_core#ToggleHover()<CR>
+    nnoremap <buffer> <silent> gd <cmd>call gjallarhorn_core#GotoDefinition()<CR>
 enddef
+

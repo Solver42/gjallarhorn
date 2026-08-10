@@ -35,7 +35,7 @@ cd ~/.vim/pack/plugins/start/gjallarhorn && git pull && sh install.sh
 
 ## Usage
 
-- **Ctrl+X Ctrl+U** triggers autocomplete suggestions for structs, enums, unions, type aliases, imported libraries, and chained member access (a.b.c).
+- **Ctrl+X Ctrl+O** triggers autocomplete suggestions for structs, enums, unions, type aliases, local variables, imported libraries, and chained member access (a.b.c).
 - **K** toggles a popup displaying detailed information about the symbol under the cursor, including enum values, union types, struct fields, constant values, and procedure signatures (parameters and return types).
 - **gd** jumps to the symbol's declaration, even if the file is not currently open in Vim.
 
@@ -59,6 +59,12 @@ You can change which files/directories mark a project root, by setting `g:gjalla
 
 ```vim
 let g:gjallarhorn_root_markers = ['.git', 'main.odin']
+```
+
+For easier autocomplete access, remap Ctrl+Space in `.vimrc`:
+
+```vim
+inoremap <silent> <NUL> <C-x><C-o>
 ```
 
 ## License

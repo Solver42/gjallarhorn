@@ -97,23 +97,7 @@ File_Symbol_Names :: struct {
 }
 g_file_symbols : map[string]File_Symbol_Names
 
-g_file_arenas : map[string]virtual.Arena
 
-arena_reset :: proc(arena: ^virtual.Arena) {
-    if arena.curr_block == nil {
-        if err := virtual.arena_init_growing(arena); err != nil {
-            fmt.eprintfln("gjallarhorn: arena init failed: %v", err)
-        }
-        return
-    }
-    virtual.arena_free_all(arena)
-}
-
-file_arena :: proc(path: string) -> ^virtual.Arena {
-    if arena, ok := &g_file_arenas[path]; ok { return arena }
-    g_file_arenas[path] = virtual.Arena{}
-    return &g_file_arenas[path]
-}
 
 make_project_index :: proc() -> Project_Index {
     return Project_Index{
@@ -151,114 +135,114 @@ Lexer :: struct {
 
 lexer_make :: proc(src: string) -> Lexer { return {src = src, line = 1, col = 1} }
 
-advance_pos :: proc(l: ^Lexer) {
-    c := l.src[l.pos]
-    l.pos += 1
-    if c == '\n' { l.line += 1; l.col = 1 } else { l.col += 1 }
+advance_pos :: proc(lexer: ^Lexer) {
+    c := lexer.src[lexer.pos]
+    lexer.pos += 1
+    if c == '\n' { lexer.line += 1; lexer.col = 1 } else { lexer.col += 1 }
 }
 
-lexer_skip_whitespace_and_comments :: proc(l: ^Lexer) {
-    for l.pos < len(l.src) {
-        c := l.src[l.pos]
+lexer_skip_whitespace_and_comments :: proc(lexer: ^Lexer) {
+    for lexer.pos < len(lexer.src) {
+        c := lexer.src[lexer.pos]
 
-        if l.in_block {
-            if c == '*' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '/' {
-                l.pos += 2; l.col += 2; l.in_block = false; continue
+        if lexer.in_block {
+            if c == '*' && lexer.pos+1 < len(lexer.src) && lexer.src[lexer.pos+1] == '/' {
+                lexer.pos += 2; lexer.col += 2; lexer.in_block = false; continue
             }
-            if c == '\n' { l.pos += 1; l.line += 1; l.col = 1 } else { l.pos += 1; l.col += 1 }
+            if c == '\n' { lexer.pos += 1; lexer.line += 1; lexer.col = 1 } else { lexer.pos += 1; lexer.col += 1 }
             continue
         }
 
-        if c == ' ' || c == '\t' || c == '\r' { l.pos += 1; l.col += 1; continue }
-        if c == '\n'                           { l.pos += 1; l.line += 1; l.col = 1; continue }
+        if c == ' ' || c == '\t' || c == '\r' { lexer.pos += 1; lexer.col += 1; continue }
+        if c == '\n'                           { lexer.pos += 1; lexer.line += 1; lexer.col = 1; continue }
 
-        if c == '/' && l.pos+1 < len(l.src) {
-            if l.src[l.pos+1] == '/' { for l.pos < len(l.src) && l.src[l.pos] != '\n' { l.pos += 1 }; continue }
-            if l.src[l.pos+1] == '*' { l.pos += 2; l.col += 2; l.in_block = true; continue }
+        if c == '/' && lexer.pos+1 < len(lexer.src) {
+            if lexer.src[lexer.pos+1] == '/' { for lexer.pos < len(lexer.src) && lexer.src[lexer.pos] != '\n' { lexer.pos += 1 }; continue }
+            if lexer.src[lexer.pos+1] == '*' { lexer.pos += 2; lexer.col += 2; lexer.in_block = true; continue }
         }
         break
     }
 }
 
-lexer_next_raw :: proc(l: ^Lexer) -> Token {
-    lexer_skip_whitespace_and_comments(l)
-    if l.pos >= len(l.src) { return {kind = .EOF} }
+lexer_next_raw :: proc(lexer: ^Lexer) -> Token {
+    lexer_skip_whitespace_and_comments(lexer)
+    if lexer.pos >= len(lexer.src) { return {kind = .EOF} }
 
-    start_line := l.line
-    start_col  := l.col
-    c := l.src[l.pos]
+    start_line := lexer.line
+    start_col  := lexer.col
+    c := lexer.src[lexer.pos]
 
     if c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
-        start := l.pos
-        for l.pos < len(l.src) {
-            b := l.src[l.pos]
+        start := lexer.pos
+        for lexer.pos < len(lexer.src) {
+            b := lexer.src[lexer.pos]
             if b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
-                l.pos += 1; l.col += 1
+                lexer.pos += 1; lexer.col += 1
             } else { break }
         }
-        return {kind = .Identifier, text = l.src[start:l.pos], line = start_line, col = start_col}
+        return {kind = .Identifier, text = lexer.src[start:lexer.pos], line = start_line, col = start_col}
     }
 
     if c == ':' {
-        if l.pos+1 < len(l.src) && l.src[l.pos+1] == ':' {
-            advance_pos(l); advance_pos(l)
+        if lexer.pos+1 < len(lexer.src) && lexer.src[lexer.pos+1] == ':' {
+            advance_pos(lexer); advance_pos(lexer)
             return {kind = .Double_Colon, text = "::", line = start_line, col = start_col}
         }
-        advance_pos(l)
+        advance_pos(lexer)
         return {kind = .Colon, text = ":", line = start_line, col = start_col}
     }
 
     if c == '"' {
-        advance_pos(l)
-        start := l.pos
-        for l.pos < len(l.src) && l.src[l.pos] != '"' {
-            if l.src[l.pos] == '\\' { l.pos += 1; l.col += 1 }
-            advance_pos(l)
+        advance_pos(lexer)
+        start := lexer.pos
+        for lexer.pos < len(lexer.src) && lexer.src[lexer.pos] != '"' {
+            if lexer.src[lexer.pos] == '\\' { lexer.pos += 1; lexer.col += 1 }
+            advance_pos(lexer)
         }
-        text := l.src[start:l.pos]
-        if l.pos < len(l.src) { advance_pos(l) }
+        text := lexer.src[start:lexer.pos]
+        if lexer.pos < len(lexer.src) { advance_pos(lexer) }
         return {kind = .String_Literal, text = text, line = start_line, col = start_col}
     }
 
     if c == '`' {
-        advance_pos(l)
-        start := l.pos
-        for l.pos < len(l.src) && l.src[l.pos] != '`' { advance_pos(l) }
-        text := l.src[start:l.pos]
-        if l.pos < len(l.src) { advance_pos(l) }
+        advance_pos(lexer)
+        start := lexer.pos
+        for lexer.pos < len(lexer.src) && lexer.src[lexer.pos] != '`' { advance_pos(lexer) }
+        text := lexer.src[start:lexer.pos]
+        if lexer.pos < len(lexer.src) { advance_pos(lexer) }
         return {kind = .String_Literal, text = text, line = start_line, col = start_col}
     }
 
     if c == '\'' {
-        start := l.pos
-        advance_pos(l)
-        for l.pos < len(l.src) && l.src[l.pos] != '\'' {
-            if l.src[l.pos] == '\\' { l.pos += 1; l.col += 1 }
-            advance_pos(l)
+        start := lexer.pos
+        advance_pos(lexer)
+        for lexer.pos < len(lexer.src) && lexer.src[lexer.pos] != '\'' {
+            if lexer.src[lexer.pos] == '\\' { lexer.pos += 1; lexer.col += 1 }
+            advance_pos(lexer)
         }
-        if l.pos < len(l.src) { advance_pos(l) }
-        return {kind = .Other, text = l.src[start:l.pos], line = start_line, col = start_col}
+        if lexer.pos < len(lexer.src) { advance_pos(lexer) }
+        return {kind = .Other, text = lexer.src[start:lexer.pos], line = start_line, col = start_col}
     }
 
-    if c == '{' { advance_pos(l); return {kind = .Open_Brace,  text = "{", line = start_line, col = start_col} }
-    if c == '}' { advance_pos(l); return {kind = .Close_Brace, text = "}", line = start_line, col = start_col} }
-    if c == ',' { advance_pos(l); return {kind = .Comma,       text = ",", line = start_line, col = start_col} }
-    if c == '#' { advance_pos(l); return {kind = .Hash,        text = "#", line = start_line, col = start_col} }
+    if c == '{' { advance_pos(lexer); return {kind = .Open_Brace,  text = "{", line = start_line, col = start_col} }
+    if c == '}' { advance_pos(lexer); return {kind = .Close_Brace, text = "}", line = start_line, col = start_col} }
+    if c == ',' { advance_pos(lexer); return {kind = .Comma,       text = ",", line = start_line, col = start_col} }
+    if c == '#' { advance_pos(lexer); return {kind = .Hash,        text = "#", line = start_line, col = start_col} }
 
-    start := l.pos
-    _, w  := utf8.decode_rune_in_string(l.src[l.pos:])
-    l.pos += w; l.col += 1
-    return {kind = .Other, text = l.src[start:l.pos], line = start_line, col = start_col}
+    start := lexer.pos
+    _, w  := utf8.decode_rune_in_string(lexer.src[lexer.pos:])
+    lexer.pos += w; lexer.col += 1
+    return {kind = .Other, text = lexer.src[start:lexer.pos], line = start_line, col = start_col}
 }
 
-lexer_next :: proc(l: ^Lexer) -> Token {
-    if l.has_peek { l.has_peek = false; return l.peek_tok }
-    return lexer_next_raw(l)
+lexer_next :: proc(lexer: ^Lexer) -> Token {
+    if lexer.has_peek { lexer.has_peek = false; return lexer.peek_tok }
+    return lexer_next_raw(lexer)
 }
 
-lexer_peek :: proc(l: ^Lexer) -> Token {
-    if !l.has_peek { l.peek_tok = lexer_next_raw(l); l.has_peek = true }
-    return l.peek_tok
+lexer_peek :: proc(lexer: ^Lexer) -> Token {
+    if !lexer.has_peek { lexer.peek_tok = lexer_next_raw(lexer); lexer.has_peek = true }
+    return lexer.peek_tok
 }
 
 dir_contains_root_marker :: proc(dir: string) -> bool {
@@ -303,76 +287,76 @@ is_keyword :: proc(word: string) -> bool {
     return false
 }
 
-skip_to_next_statement :: proc(l: ^Lexer) {
-    start_line := l.line
+skip_to_next_statement :: proc(lexer: ^Lexer) {
+    start_line := lexer.line
     for {
-        pk := lexer_peek(l)
-        if pk.kind == .EOF || pk.line > start_line { return }
-        lexer_next(l)
+        peeked := lexer_peek(lexer)
+        if peeked.kind == .EOF || peeked.line > start_line { return }
+        lexer_next(lexer)
     }
 }
 
-skip_rhs_value :: proc(l: ^Lexer) {
-    start_line  := l.line
+skip_rhs_value :: proc(lexer: ^Lexer) {
+    start_line  := lexer.line
     paren_depth := 0
     brace_depth := 0
     for {
-        pk := lexer_peek(l)
-        if pk.kind == .EOF || pk.line > start_line { return }
-        if pk.kind == .Open_Brace                              { brace_depth += 1 }
-        if pk.kind == .Close_Brace && brace_depth > 0         { brace_depth -= 1 }
-        if pk.kind == .Other && pk.text == "("                { paren_depth += 1 }
-        if pk.kind == .Other && pk.text == ")" && paren_depth > 0 { paren_depth -= 1 }
-        if pk.kind == .Comma && paren_depth == 0 && brace_depth == 0 { return }
-        lexer_next(l)
+        peeked := lexer_peek(lexer)
+        if peeked.kind == .EOF || peeked.line > start_line { return }
+        if peeked.kind == .Open_Brace                              { brace_depth += 1 }
+        if peeked.kind == .Close_Brace && brace_depth > 0         { brace_depth -= 1 }
+        if peeked.kind == .Other && peeked.text == "("                { paren_depth += 1 }
+        if peeked.kind == .Other && peeked.text == ")" && paren_depth > 0 { paren_depth -= 1 }
+        if peeked.kind == .Comma && paren_depth == 0 && brace_depth == 0 { return }
+        lexer_next(lexer)
     }
 }
 
-write_type_until :: proc(l: ^Lexer, sb: ^strings.Builder, stop_check: proc(Token_Kind, string) -> bool, max_line := max(int)) {
+write_type_until :: proc(lexer: ^Lexer, sb: ^strings.Builder, stop_check: proc(Token_Kind, string) -> bool, max_line := max(int)) {
     prev_was_dot := false
     for {
-        pk := lexer_peek(l)
-        if pk.kind == .EOF || pk.line > max_line { break }
-        if stop_check(pk.kind, pk.text) { break }
-        if pk.kind == .Identifier && !prev_was_dot {
-            pos, line, col, in_block, has_peek, peek_tok := l.pos, l.line, l.col, l.in_block, l.has_peek, l.peek_tok
-            lexer_next(l)
-            nk := lexer_peek(l).kind
-            l.pos, l.line, l.col, l.in_block, l.has_peek, l.peek_tok = pos, line, col, in_block, has_peek, peek_tok
-            if nk == .Colon || nk == .Double_Colon { break }
+        peeked := lexer_peek(lexer)
+        if peeked.kind == .EOF || peeked.line > max_line { break }
+        if stop_check(peeked.kind, peeked.text) { break }
+        if peeked.kind == .Identifier && !prev_was_dot {
+            pos, line, col, in_block, has_peek, peek_tok := lexer.pos, lexer.line, lexer.col, lexer.in_block, lexer.has_peek, lexer.peek_tok
+            lexer_next(lexer)
+            next_kind := lexer_peek(lexer).kind
+            lexer.pos, lexer.line, lexer.col, lexer.in_block, lexer.has_peek, lexer.peek_tok = pos, line, col, in_block, has_peek, peek_tok
+            if next_kind == .Colon || next_kind == .Double_Colon { break }
         }
-        t := lexer_next(l)
+        t := lexer_next(lexer)
         prev_was_dot = (t.text == ".")
         if t.text != "" { strings.write_string(sb, t.text) }
     }
 }
 
-parse_type_until :: proc(l: ^Lexer, stop_check: proc(Token_Kind, string) -> bool, max_line := max(int)) -> string {
+parse_type_until :: proc(lexer: ^Lexer, stop_check: proc(Token_Kind, string) -> bool, max_line := max(int)) -> string {
     sb := strings.builder_make(context.allocator)
-    write_type_until(l, &sb, stop_check, max_line)
+    write_type_until(lexer, &sb, stop_check, max_line)
     return strings.to_string(sb)
 }
 
-infer_numeric_type :: proc(l: ^Lexer) -> string {
+infer_numeric_type :: proc(lexer: ^Lexer) -> string {
     has_dot_or_e := false
     prev_was_dot := false
-    line         := lexer_peek(l).line
+    line         := lexer_peek(lexer).line
     prev_end_col := -1
     for {
-        pk := lexer_peek(l)
-        if pk.kind == .EOF || pk.line > line { break }
-        if pk.kind == .Comma                 { break }
-        if pk.kind == .Other && pk.text == ";" { break }
-        if pk.kind == .Other && pk.text == "." && prev_was_dot { has_dot_or_e = false; break }
-        if pk.kind == .Identifier && prev_end_col == pk.col {
-            lexer_next(l)
-            switch pk.text {
+        peeked := lexer_peek(lexer)
+        if peeked.kind == .EOF || peeked.line > line { break }
+        if peeked.kind == .Comma                 { break }
+        if peeked.kind == .Other && peeked.text == ";" { break }
+        if peeked.kind == .Other && peeked.text == "." && prev_was_dot { has_dot_or_e = false; break }
+        if peeked.kind == .Identifier && prev_end_col == peeked.col {
+            lexer_next(lexer)
+            switch peeked.text {
             case "i":      return "complex128"
             case "j", "k": return "quaternion256"
             }
             break
         }
-        tok := lexer_next(l)
+        tok := lexer_next(lexer)
         if tok.kind == .Other {
             prev_end_col = tok.col + len(tok.text)
             prev_was_dot = tok.text == "."
@@ -388,35 +372,35 @@ infer_numeric_type :: proc(l: ^Lexer) -> string {
     return "int"
 }
 
-peek_rhs_type :: proc(l: ^Lexer) -> string {
-    tok := lexer_peek(l)
-    if tok.kind == .String_Literal { skip_rhs_value(l); return "string" }
+peek_rhs_type :: proc(lexer: ^Lexer) -> string {
+    tok := lexer_peek(lexer)
+    if tok.kind == .String_Literal { skip_rhs_value(lexer); return "string" }
     if tok.kind == .Other && len(tok.text) > 0 {
         if tok.text[0] >= '0' && tok.text[0] <= '9' {
-            return infer_numeric_type(l)
+            return infer_numeric_type(lexer)
         }
         if (tok.text[0] == '-' || tok.text[0] == '+') {
-            pos, line, col, in_block, has_peek, peek_tok := l.pos, l.line, l.col, l.in_block, l.has_peek, l.peek_tok
-            lexer_next(l)
-            nk := lexer_peek(l)
-            l.pos, l.line, l.col, l.in_block, l.has_peek, l.peek_tok = pos, line, col, in_block, has_peek, peek_tok
-            if nk.kind == .Other && len(nk.text) > 0 && nk.text[0] >= '0' && nk.text[0] <= '9' {
-                return infer_numeric_type(l)
+            pos, line, col, in_block, has_peek, peek_tok := lexer.pos, lexer.line, lexer.col, lexer.in_block, lexer.has_peek, lexer.peek_tok
+            lexer_next(lexer)
+            after_sign_tok := lexer_peek(lexer)
+            lexer.pos, lexer.line, lexer.col, lexer.in_block, lexer.has_peek, lexer.peek_tok = pos, line, col, in_block, has_peek, peek_tok
+            if after_sign_tok.kind == .Other && len(after_sign_tok.text) > 0 && after_sign_tok.text[0] >= '0' && after_sign_tok.text[0] <= '9' {
+                return infer_numeric_type(lexer)
             }
         }
-        if tok.text[0] == '\'' { skip_rhs_value(l); return "rune" }
+        if tok.text[0] == '\'' { skip_rhs_value(lexer); return "rune" }
     }
     if tok.kind == .Identifier {
         switch tok.text {
-        case "true", "false": skip_rhs_value(l); return "bool"
-        case "nil":           skip_rhs_value(l); return ""
+        case "true", "false": skip_rhs_value(lexer); return "bool"
+        case "nil":           skip_rhs_value(lexer); return ""
         }
     }
-    type_str := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
+    type_str := parse_type_until(lexer, proc(k: Token_Kind, t: string) -> bool {
         return k == .EOF || k == .Open_Brace || k == .Colon ||
                (k == .Other && (t == "=" || t == "("))
     }, tok.line)
-    skip_rhs_value(l)
+    skip_rhs_value(lexer)
     return type_str
 }
 
@@ -432,50 +416,50 @@ File_Parse_Result :: struct {
     import_aliases : map[string]string,
 }
 
-parse_decl_rhs :: proc(l: ^Lexer, name: string, loc: Symbol_Ref, result: ^File_Parse_Result) {
-    after := lexer_peek(l)
+parse_decl_rhs :: proc(lexer: ^Lexer, name: string, loc: Symbol_Ref, result: ^File_Parse_Result) {
+    after := lexer_peek(lexer)
 
     if after.kind == .Identifier {
         switch after.text {
         case "struct":
-            lexer_next(l)
-            s := parse_struct_body(l)
+            lexer_next(lexer)
+            s := parse_struct_body(lexer)
             s.location = loc
             result.own_structs[strings.clone(name)] = s
             return
         case "enum":
-            lexer_next(l)
-            e := parse_enum_body(l)
+            lexer_next(lexer)
+            e := parse_enum_body(lexer)
             e.location = loc
             result.own_enums[strings.clone(name)] = e
             return
         case "proc":
-            lexer_next(l)
-            p := parse_proc_signature(l)
+            lexer_next(lexer)
+            p := parse_proc_signature(lexer)
             p.location = loc
             result.own_procs[strings.clone(name)] = p
             return
         case "union":
-            lexer_next(l)
-            u := parse_union_body(l)
+            lexer_next(lexer)
+            u := parse_union_body(lexer)
             u.location = loc
             result.own_unions[strings.clone(name)] = u
             return
         case "distinct":
-            lexer_next(l)
-            type_str := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
+            lexer_next(lexer)
+            type_str := parse_type_until(lexer, proc(k: Token_Kind, t: string) -> bool {
                 return k == .EOF || k == .Comma || k == .Open_Brace
             })
             if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
             return
         }
         if after.text == "true" || after.text == "false" {
-            lexer_next(l)
+            lexer_next(lexer)
             result.own_variables[strings.clone(name)] = "bool"
             result.own_constants[strings.clone(name)] = strings.clone(after.text)
             return
         }
-        type_str := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
+        type_str := parse_type_until(lexer, proc(k: Token_Kind, t: string) -> bool {
             return k == .EOF || k == .Comma || k == .Open_Brace
         })
         if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
@@ -483,25 +467,25 @@ parse_decl_rhs :: proc(l: ^Lexer, name: string, loc: Symbol_Ref, result: ^File_P
     }
 
     if after.kind == .Hash {
-        lexer_next(l)
-        dir := lexer_peek(l)
+        lexer_next(lexer)
+        dir := lexer_peek(lexer)
         if dir.kind == .Identifier {
-            if dir.text == "type" { lexer_next(l); parse_decl_rhs(l, name, loc, result); return }
+            if dir.text == "type" { lexer_next(lexer); parse_decl_rhs(lexer, name, loc, result); return }
         }
-        skip_to_next_statement(l)
+        skip_to_next_statement(lexer)
         return
     }
 
     if after.kind == .String_Literal || after.kind == .Other {
-        type_str := peek_rhs_type(l)
+        type_str := peek_rhs_type(lexer)
         if type_str != "" {
             result.own_variables[strings.clone(name)] = type_str
             raw_val : string
             if after.kind == .String_Literal {
                 raw_val = after.text
             } else {
-                rhs_start := uintptr(raw_data(after.text)) - uintptr(raw_data(l.src))
-                raw_val = strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                rhs_start := uintptr(raw_data(after.text)) - uintptr(raw_data(lexer.src))
+                raw_val = strings.trim_right(lexer.src[rhs_start:lexer.pos], " \t\r\n")
                 if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
             }
             if raw_val != "" { result.own_constants[strings.clone(name)] = strings.clone(raw_val) }
@@ -521,19 +505,19 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
         own_constants  = make(map[string]string),
         import_aliases = make(map[string]string),
     }
-    l           := lexer_make(src)
+    lexer           := lexer_make(src)
     paren_depth := 0
     brace_depth := 0
 
     loc := Symbol_Ref{file = result.file_path}
 
     for {
-        tok := lexer_next(&l)
+        tok := lexer_next(&lexer)
         if tok.kind == .EOF { break }
         if tok.kind == .Open_Brace  { brace_depth += 1; continue }
         if tok.kind == .Close_Brace { if brace_depth > 0 { brace_depth -= 1 }; continue }
         if tok.kind == .Hash {
-            if lexer_peek(&l).kind == .Identifier { lexer_next(&l) }
+            if lexer_peek(&lexer).kind == .Identifier { lexer_next(&lexer) }
             continue
         }
         if tok.kind == .Other {
@@ -550,13 +534,13 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
         if is_keyword(name) { continue }
 
         if name == "import" {
-            peek := lexer_peek(&l)
+            peek := lexer_peek(&lexer)
             alias, path: string
             if peek.kind == .String_Literal {
-                lexer_next(&l); path = peek.text; alias = derive_import_alias(path)
+                lexer_next(&lexer); path = peek.text; alias = derive_import_alias(path)
             } else if peek.kind == .Identifier || (peek.kind == .Other && peek.text == ".") {
-                a := lexer_next(&l); alias = a.text
-                p := lexer_next(&l); if p.kind == .String_Literal { path = p.text }
+                a := lexer_next(&lexer); alias = a.text
+                p := lexer_next(&lexer); if p.kind == .String_Literal { path = p.text }
             }
             if alias != "_" && alias != "" && path != "" {
                 result.import_aliases[strings.clone(alias)] = strings.clone(path)
@@ -568,44 +552,44 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
         names := make([dynamic]string,     context.temp_allocator)
         append(&names, name)
         append(&locs,  loc)
-        for lexer_peek(&l).kind == .Comma {
-            lexer_next(&l)
-            nxt := lexer_peek(&l)
-            if nxt.kind != .Identifier { break }
-            n := lexer_next(&l)
+        for lexer_peek(&lexer).kind == .Comma {
+            lexer_next(&lexer)
+            next_tok := lexer_peek(&lexer)
+            if next_tok.kind != .Identifier { break }
+            n := lexer_next(&lexer)
             if is_keyword(n.text) { break }
             append(&names, n.text)
             append(&locs,  Symbol_Ref{file = result.file_path, line = n.line, col = n.col})
         }
 
-        next := lexer_peek(&l)
+        next := lexer_peek(&lexer)
 
         if next.kind == .Double_Colon {
-            lexer_next(&l)
-            parse_decl_rhs(&l, names[0], locs[0], &result)
+            lexer_next(&lexer)
+            parse_decl_rhs(&lexer, names[0], locs[0], &result)
             continue
         }
 
         if next.kind == .Colon {
-            lexer_next(&l)
-            type_tok := lexer_peek(&l)
+            lexer_next(&lexer)
+            type_tok := lexer_peek(&lexer)
 
             if type_tok.kind == .Other && type_tok.text == "=" {
-                lexer_next(&l)
+                lexer_next(&lexer)
                 for i in 0..<len(names) {
-                    type_str := peek_rhs_type(&l)
+                    type_str := peek_rhs_type(&lexer)
                     if type_str != "" {
                         result.own_variables[strings.clone(names[i])]     = type_str
                         result.own_variable_locs[strings.clone(names[i])] = locs[i]
                     }
-                    if i < len(names)-1 && lexer_peek(&l).kind == .Comma { lexer_next(&l) }
+                    if i < len(names)-1 && lexer_peek(&lexer).kind == .Comma { lexer_next(&lexer) }
                 }
                 continue
             }
 
             if type_tok.kind == .Colon {
-                lexer_next(&l)
-                parse_decl_rhs(&l, names[0], locs[0], &result)
+                lexer_next(&lexer)
+                parse_decl_rhs(&lexer, names[0], locs[0], &result)
                 continue
             }
 
@@ -613,29 +597,29 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
             start_line := type_tok.line
             depth := 0
             for {
-                pk := lexer_peek(&l)
-                if pk.kind == .EOF || pk.line > start_line { break }
-                if pk.kind == .Colon && depth == 0 { break }
-                if pk.kind == .Other && pk.text == "=" && depth == 0 { break }
-                if pk.kind == .Open_Brace || pk.kind == .Close_Brace || pk.kind == .Comma { break }
-                if pk.kind == .Other && pk.text == "(" { depth += 1 }
-                if pk.kind == .Other && pk.text == ")" && depth > 0 { depth -= 1 }
-                t := lexer_next(&l)
+                peeked := lexer_peek(&lexer)
+                if peeked.kind == .EOF || peeked.line > start_line { break }
+                if peeked.kind == .Colon && depth == 0 { break }
+                if peeked.kind == .Other && peeked.text == "=" && depth == 0 { break }
+                if peeked.kind == .Open_Brace || peeked.kind == .Close_Brace || peeked.kind == .Comma { break }
+                if peeked.kind == .Other && peeked.text == "(" { depth += 1 }
+                if peeked.kind == .Other && peeked.text == ")" && depth > 0 { depth -= 1 }
+                t := lexer_next(&lexer)
                 if t.text != "" { append(&type_parts, t.text) }
             }
             type_str := strings.join(type_parts[:], "")
 
             if type_str != "" && !is_keyword(type_str) {
                 raw_val : string
-                if lexer_peek(&l).kind == .Colon {
-                    lexer_next(&l)
-                    val_tok  := lexer_peek(&l)
-                    skip_to_next_statement(&l)
+                if lexer_peek(&lexer).kind == .Colon {
+                    lexer_next(&lexer)
+                    val_tok  := lexer_peek(&lexer)
+                    skip_to_next_statement(&lexer)
                     if val_tok.kind == .String_Literal {
                         raw_val = val_tok.text
                     } else if val_tok.kind == .Identifier || val_tok.kind == .Other {
-                        rhs_start := uintptr(raw_data(val_tok.text)) - uintptr(raw_data(l.src))
-                        raw_val = strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                        rhs_start := uintptr(raw_data(val_tok.text)) - uintptr(raw_data(lexer.src))
+                        raw_val = strings.trim_right(lexer.src[rhs_start:lexer.pos], " \t\r\n")
                         if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
                     }
                 }
@@ -651,35 +635,35 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
     return result
 }
 
-parse_struct_body :: proc(l: ^Lexer) -> Struct_Definition {
+parse_struct_body :: proc(lexer: ^Lexer) -> Struct_Definition {
     defn  := Struct_Definition{fields = make([dynamic]Struct_Field)}
     depth := 0
-    for { tok := lexer_next(l); if tok.kind == .EOF { return defn }; if tok.kind == .Open_Brace { depth = 1; break } }
+    for { tok := lexer_next(lexer); if tok.kind == .EOF { return defn }; if tok.kind == .Open_Brace { depth = 1; break } }
 
     for depth > 0 {
-        tok := lexer_next(l)
+        tok := lexer_next(lexer)
         #partial switch tok.kind {
         case .EOF:         return defn
         case .Open_Brace:  depth += 1
         case .Close_Brace: depth -= 1
-        case .Hash:        if lexer_peek(l).kind == .Identifier { lexer_next(l) }
+        case .Hash:        if lexer_peek(lexer).kind == .Identifier { lexer_next(lexer) }
         case .Identifier:
             if depth != 1 { continue }
             names := make([dynamic]string, context.temp_allocator)
             append(&names, tok.text)
-            for lexer_peek(l).kind == .Comma {
-                lexer_next(l)
-                next := lexer_peek(l)
+            for lexer_peek(lexer).kind == .Comma {
+                lexer_next(lexer)
+                next := lexer_peek(lexer)
                 if next.kind != .Identifier { break }
-                append(&names, lexer_next(l).text)
+                append(&names, lexer_next(lexer).text)
             }
-            if lexer_peek(l).kind != .Colon { continue }
-            lexer_next(l)
+            if lexer_peek(lexer).kind != .Colon { continue }
+            lexer_next(lexer)
 
-            field_type := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
+            field_type := parse_type_until(lexer, proc(k: Token_Kind, t: string) -> bool {
                 return k == .EOF || k == .Comma || k == .Close_Brace
             })
-            if lexer_peek(l).kind == .Comma { lexer_next(l) }
+            if lexer_peek(lexer).kind == .Comma { lexer_next(lexer) }
 
             for field_name in names {
                 append(&defn.fields, Struct_Field{
@@ -693,46 +677,46 @@ parse_struct_body :: proc(l: ^Lexer) -> Struct_Definition {
     return defn
 }
 
-parse_enum_body :: proc(l: ^Lexer) -> Enum_Definition {
+parse_enum_body :: proc(lexer: ^Lexer) -> Enum_Definition {
     defn := Enum_Definition{values = make([dynamic]string)}
-    for { tok := lexer_next(l); if tok.kind == .EOF { return defn }; if tok.kind == .Open_Brace { break } }
+    for { tok := lexer_next(lexer); if tok.kind == .EOF { return defn }; if tok.kind == .Open_Brace { break } }
     for {
-        tok := lexer_next(l)
+        tok := lexer_next(lexer)
         #partial switch tok.kind {
         case .EOF, .Close_Brace: return defn
         case .Identifier:
             append(&defn.values, strings.clone(tok.text))
             for {
-                pk := lexer_peek(l)
-                if pk.kind == .EOF || pk.kind == .Comma || pk.kind == .Close_Brace { break }
-                lexer_next(l)
+                peeked := lexer_peek(lexer)
+                if peeked.kind == .EOF || peeked.kind == .Comma || peeked.kind == .Close_Brace { break }
+                lexer_next(lexer)
             }
-            if lexer_peek(l).kind == .Comma { lexer_next(l) }
+            if lexer_peek(lexer).kind == .Comma { lexer_next(lexer) }
         case:
         }
     }
 }
 
-parse_union_body :: proc(l: ^Lexer) -> Union_Definition {
+parse_union_body :: proc(lexer: ^Lexer) -> Union_Definition {
     defn := Union_Definition{variants = make([dynamic]string)}
-    for { tok := lexer_next(l); if tok.kind == .EOF { return defn }; if tok.kind == .Open_Brace { break } }
+    for { tok := lexer_next(lexer); if tok.kind == .EOF { return defn }; if tok.kind == .Open_Brace { break } }
     for {
-        if lexer_peek(l).kind == .EOF || lexer_peek(l).kind == .Close_Brace { lexer_next(l); return defn }
-        variant := parse_type_until(l, proc(k: Token_Kind, t: string) -> bool {
+        if lexer_peek(lexer).kind == .EOF || lexer_peek(lexer).kind == .Close_Brace { lexer_next(lexer); return defn }
+        variant := parse_type_until(lexer, proc(k: Token_Kind, t: string) -> bool {
             return k == .EOF || k == .Comma || k == .Close_Brace
         })
         if variant != "" { append(&defn.variants, variant) }
-        if lexer_peek(l).kind == .Comma { lexer_next(l) }
+        if lexer_peek(lexer).kind == .Comma { lexer_next(lexer) }
     }
 }
 
-type_list_is_named :: proc(l: ^Lexer) -> bool {
-    pos, line, col, in_block, has_peek, peek_tok := l.pos, l.line, l.col, l.in_block, l.has_peek, l.peek_tok
-    defer { l.pos = pos; l.line = line; l.col = col; l.in_block = in_block; l.has_peek = has_peek; l.peek_tok = peek_tok }
+type_list_is_named :: proc(lexer: ^Lexer) -> bool {
+    pos, line, col, in_block, has_peek, peek_tok := lexer.pos, lexer.line, lexer.col, lexer.in_block, lexer.has_peek, lexer.peek_tok
+    defer { lexer.pos = pos; lexer.line = line; lexer.col = col; lexer.in_block = in_block; lexer.has_peek = has_peek; lexer.peek_tok = peek_tok }
 
     depth := 0
     for {
-        tok := lexer_next(l)
+        tok := lexer_next(lexer)
         if tok.kind == .EOF { return false }
         if tok.kind == .Colon { return true }
         if tok.kind == .Other && tok.text == "(" { depth += 1 }
@@ -743,86 +727,86 @@ type_list_is_named :: proc(l: ^Lexer) -> bool {
     }
 }
 
-parse_bare_type_list :: proc(l: ^Lexer) -> [dynamic]string {
+parse_bare_type_list :: proc(lexer: ^Lexer) -> [dynamic]string {
     types := make([dynamic]string)
     for {
         sb := strings.builder_make(context.allocator)
         depth := 0
         for {
-            pk := lexer_peek(l)
-            if pk.kind == .EOF { break }
-            if pk.kind == .Other && pk.text == "(" { depth += 1 }
-            if pk.kind == .Other && pk.text == ")" {
+            peeked := lexer_peek(lexer)
+            if peeked.kind == .EOF { break }
+            if peeked.kind == .Other && peeked.text == "(" { depth += 1 }
+            if peeked.kind == .Other && peeked.text == ")" {
                 if depth == 0 { break }
                 depth -= 1
             }
-            if depth == 0 && pk.kind == .Comma { break }
-            strings.write_string(&sb, lexer_next(l).text)
+            if depth == 0 && peeked.kind == .Comma { break }
+            strings.write_string(&sb, lexer_next(lexer).text)
         }
         if s := strings.to_string(sb); s != "" { append(&types, s) }
-        if lexer_peek(l).kind == .Comma { lexer_next(l); continue }
+        if lexer_peek(lexer).kind == .Comma { lexer_next(lexer); continue }
         return types
     }
 }
 
-parse_type_list :: proc(l: ^Lexer) -> [dynamic]string {
-    if !type_list_is_named(l) { return parse_bare_type_list(l) }
+parse_type_list :: proc(lexer: ^Lexer) -> [dynamic]string {
+    if !type_list_is_named(lexer) { return parse_bare_type_list(lexer) }
 
     types := make([dynamic]string)
     for {
         name_count := 0
         for {
-            pk := lexer_peek(l)
-            if pk.kind == .EOF { return types }
-            if pk.kind == .Other && pk.text == ")" { return types }
-            if pk.kind == .Colon { break }
-            if pk.kind == .Identifier { name_count += 1 }
-            lexer_next(l)
+            peeked := lexer_peek(lexer)
+            if peeked.kind == .EOF { return types }
+            if peeked.kind == .Other && peeked.text == ")" { return types }
+            if peeked.kind == .Colon { break }
+            if peeked.kind == .Identifier { name_count += 1 }
+            lexer_next(lexer)
         }
-        lexer_next(l)
+        lexer_next(lexer)
 
         sb := strings.builder_make(context.allocator)
         for {
-            pk := lexer_peek(l)
-            if pk.kind == .EOF { break }
-            if pk.kind == .Other && (pk.text == ")" || pk.text == "=") { break }
-            if pk.kind == .Comma { break }
-            strings.write_string(&sb, lexer_next(l).text)
+            peeked := lexer_peek(lexer)
+            if peeked.kind == .EOF { break }
+            if peeked.kind == .Other && (peeked.text == ")" || peeked.text == "=") { break }
+            if peeked.kind == .Comma { break }
+            strings.write_string(&sb, lexer_next(lexer).text)
         }
         if s := strings.to_string(sb); s != "" {
             for _ in 0..<max(name_count, 1) { append(&types, s) }
         }
 
-        if lexer_peek(l).kind == .Comma { lexer_next(l) }
+        if lexer_peek(lexer).kind == .Comma { lexer_next(lexer) }
     }
 }
 
-parse_proc_signature :: proc(l: ^Lexer) -> Proc_Definition {
+parse_proc_signature :: proc(lexer: ^Lexer) -> Proc_Definition {
     defn := Proc_Definition{params = make([dynamic]string), returns = make([dynamic]string)}
 
-    if lexer_peek(l).kind == .String_Literal { lexer_next(l) }
-    open := lexer_next(l)
+    if lexer_peek(lexer).kind == .String_Literal { lexer_next(lexer) }
+    open := lexer_next(lexer)
     if open.kind != .Other || open.text != "(" { return defn }
 
-    defn.params = parse_type_list(l)
-    if lexer_peek(l).kind == .Other && lexer_peek(l).text == ")" { lexer_next(l) }
+    defn.params = parse_type_list(lexer)
+    if lexer_peek(lexer).kind == .Other && lexer_peek(lexer).text == ")" { lexer_next(lexer) }
 
-    if lexer_peek(l).kind == .Other && lexer_peek(l).text == "-" {
-        lexer_next(l)
-        if lexer_peek(l).kind == .Other && lexer_peek(l).text == ">" { lexer_next(l) }
+    if lexer_peek(lexer).kind == .Other && lexer_peek(lexer).text == "-" {
+        lexer_next(lexer)
+        if lexer_peek(lexer).kind == .Other && lexer_peek(lexer).text == ">" { lexer_next(lexer) }
 
-        if lexer_peek(l).kind == .Other && lexer_peek(l).text == "(" {
-            lexer_next(l)
-            defn.returns = parse_type_list(l)
-            if lexer_peek(l).kind == .Other && lexer_peek(l).text == ")" { lexer_next(l) }
+        if lexer_peek(lexer).kind == .Other && lexer_peek(lexer).text == "(" {
+            lexer_next(lexer)
+            defn.returns = parse_type_list(lexer)
+            if lexer_peek(lexer).kind == .Other && lexer_peek(lexer).text == ")" { lexer_next(lexer) }
         } else {
-			arrow_line := lexer_peek(l).line
+			arrow_line := lexer_peek(lexer).line
             sb := strings.builder_make(context.allocator)
             for {
-                pk := lexer_peek(l)
-                if pk.kind == .EOF || pk.kind == .Open_Brace || pk.line > arrow_line { break }
-                if pk.kind == .Hash || (pk.kind == .Other && pk.text == "-") { break }
-                strings.write_string(&sb, lexer_next(l).text)
+                peeked := lexer_peek(lexer)
+                if peeked.kind == .EOF || peeked.kind == .Open_Brace || peeked.line > arrow_line { break }
+                if peeked.kind == .Hash || (peeked.kind == .Other && peeked.text == "-") { break }
+                strings.write_string(&sb, lexer_next(lexer).text)
             }
             if s := strings.to_string(sb); s != "" { append(&defn.returns, s) }
         }
@@ -1011,9 +995,6 @@ dir_should_be_skipped :: proc(name: string) -> bool {
 }
 
 index_one_file :: proc(path: string, src: string) -> File_Parse_Result {
-    arena := file_arena(path)
-    arena_reset(arena)
-
     outer := context.allocator
     context.allocator = g_persistent_allocator
     result := parse_source_file(path, src)
@@ -1041,31 +1022,6 @@ index_one_file :: proc(path: string, src: string) -> File_Parse_Result {
     return result
 }
 
-index_directory :: proc(idx: ^Project_Index, dir_path: string) -> bool {
-    file_infos, err := os.read_all_directory_by_path(dir_path, context.allocator)
-    if err != nil { return false }
-    defer os.file_info_slice_delete(file_infos, context.allocator)
-
-    found := false
-    for fi in file_infos {
-        if fi.type == .Directory                       { continue }
-        if !strings.has_suffix(fi.name, ".odin")      { continue }
-        if  strings.has_suffix(fi.name, "_test.odin") { continue }
-
-        full_path := strings.concatenate({dir_path, "/", fi.name}, context.allocator)
-        src_data, read_err := os.read_entire_file_from_path(full_path, context.allocator)
-        if read_err != nil { delete(full_path, context.allocator); continue }
-
-        file_result := index_one_file(full_path, string(src_data))
-        merge_file_into_index(idx, &file_result)
-        g_file_hash_cache[full_path] = file_hash(src_data)
-
-        delete(src_data, context.allocator)
-        found = true
-    }
-
-    return found
-}
 
 index_project_tree :: proc(project_root: string) -> (Project_Index, [dynamic]string) {
     idx          := make_project_index()
@@ -1077,16 +1033,30 @@ index_project_tree :: proc(project_root: string) -> (Project_Index, [dynamic]str
         current := dir_stack[len(dir_stack)-1]
         pop(&dir_stack)
 
-        if index_directory(&idx, current) { append(&visited_dirs, strings.clone(current, context.allocator)) }
+        entries, err := os.read_all_directory_by_path(current, context.allocator)
+        if err != nil { continue }
 
-        sub_entries, sub_err := os.read_all_directory_by_path(current, context.allocator)
-        if sub_err != nil { continue }
-        for e in sub_entries {
-            if e.type != .Directory || dir_should_be_skipped(e.name) { continue }
-            path := strings.concatenate({current, "/", e.name}, context.allocator)
-            append(&dir_stack, path)
+        has_odin := false
+        for e in entries {
+            if e.type == .Directory {
+                if !dir_should_be_skipped(e.name) {
+                    append(&dir_stack, strings.concatenate({current, "/", e.name}, context.allocator))
+                }
+                continue
+            }
+            if !strings.has_suffix(e.name, ".odin") || strings.has_suffix(e.name, "_test.odin") { continue }
+            full_path := strings.concatenate({current, "/", e.name}, context.allocator)
+            src_data, read_err := os.read_entire_file_from_path(full_path, context.allocator)
+            if read_err != nil { delete(full_path, context.allocator); continue }
+            file_result := index_one_file(full_path, string(src_data))
+            merge_file_into_index(&idx, &file_result)
+            g_file_hash_cache[full_path] = file_hash(src_data)
+            delete(src_data, context.allocator)
+            has_odin = true
         }
-        os.file_info_slice_delete(sub_entries, context.allocator)
+        os.file_info_slice_delete(entries, context.allocator)
+
+        if has_odin { append(&visited_dirs, strings.clone(current, context.allocator)) }
     }
 
     for dir in visited_dirs {
@@ -1154,7 +1124,7 @@ project_index_destroy :: proc(idx: ^Project_Index) {
 
 package_cache_destroy :: proc() {
     delete(g_package_cache)
-    arena_reset(&g_package_arena)
+    virtual.arena_free_all(&g_package_arena)
 }
 
 file_hash :: proc(data: []u8) -> u64 {
@@ -1284,16 +1254,16 @@ resolve_name_to_type :: proc(name: string, local_ctx: string) -> string {
 
 parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[string]string {
     vars        := make(map[string]string)
-    l           := lexer_make(src)
+    lexer           := lexer_make(src)
     paren_depth := 0
     brace_depth := 0
 
     for {
-        tok := lexer_next(&l)
+        tok := lexer_next(&lexer)
         if tok.kind == .EOF { break }
         if tok.kind == .Open_Brace  { brace_depth += 1; continue }
         if tok.kind == .Close_Brace { if brace_depth > 0 { brace_depth -= 1 }; continue }
-        if tok.kind == .Hash { if lexer_peek(&l).kind == .Identifier { lexer_next(&l) }; continue }
+        if tok.kind == .Hash { if lexer_peek(&lexer).kind == .Identifier { lexer_next(&lexer) }; continue }
         if tok.kind == .Other {
             if tok.text == "(" { paren_depth += 1 }
             if tok.text == ")" && paren_depth > 0 { paren_depth -= 1 }
@@ -1306,32 +1276,29 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
         if name == "for" {
             loop_vars := make([dynamic]string, context.temp_allocator)
             for {
-                pk := lexer_peek(&l)
-                if pk.kind != .Identifier { break }
-                lv := lexer_next(&l)
+                peeked := lexer_peek(&lexer)
+                if peeked.kind != .Identifier { break }
+                lv := lexer_next(&lexer)
                 if lv.text == "in" { break }
                 append(&loop_vars, lv.text)
-                if lexer_peek(&l).kind == .Comma { lexer_next(&l) }
+                if lexer_peek(&lexer).kind == .Comma { lexer_next(&lexer) }
             }
             if len(loop_vars) == 0 { continue }
-            after := lexer_peek(&l)
+            after := lexer_peek(&lexer)
             if after.kind == .Colon {
-                // C-style: for j := 0; ... — fall through as normal := decl
-                // loop_vars[0] is now sitting in vars via the := branch below,
-                // but we've consumed the name already; re-inject by faking a := parse.
-                lexer_next(&l) // consume :
-                if lexer_peek(&l).kind == .Other && lexer_peek(&l).text == "=" {
-                    lexer_next(&l)
-                    type_str := peek_rhs_type(&l)
+                lexer_next(&lexer)
+                if lexer_peek(&lexer).kind == .Other && lexer_peek(&lexer).text == "=" {
+                    lexer_next(&lexer)
+                    type_str := peek_rhs_type(&lexer)
                     if type_str != "" { vars[strings.clone(loop_vars[0])] = type_str }
                 }
                 continue
             }
             elem_type := ""
             if after.kind == .Other && len(after.text) > 0 && after.text[0] >= '0' && after.text[0] <= '9' {
-                elem_type = infer_numeric_type(&l)
+                elem_type = infer_numeric_type(&lexer)
             } else if after.kind == .Identifier {
-                iter_name := lexer_next(&l).text
+                iter_name := lexer_next(&lexer).text
                 raw_type  := vars[iter_name]
                 if raw_type == "" { raw_type = g_index.own_variables[iter_name] }
                 if strings.has_prefix(raw_type, "[") {
@@ -1347,6 +1314,13 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
                             elem_type = raw_type[4:close]
                         }
                     }
+                } else if raw_type == "string" {
+                    if len(loop_vars) == 2 {
+                        vars[strings.clone(loop_vars[0])] = "rune"
+                        vars[strings.clone(loop_vars[1])] = "int"
+                    } else {
+                        elem_type = "rune"
+                    }
                 } else {
                     elem_type = raw_type
                 }
@@ -1361,27 +1335,27 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
 
         names := make([dynamic]string, context.temp_allocator)
         append(&names, name)
-        for lexer_peek(&l).kind == .Comma {
-            lexer_next(&l)
-            nxt := lexer_peek(&l)
-            if nxt.kind != .Identifier { break }
-            n := lexer_next(&l)
+        for lexer_peek(&lexer).kind == .Comma {
+            lexer_next(&lexer)
+            next_tok := lexer_peek(&lexer)
+            if next_tok.kind != .Identifier { break }
+            n := lexer_next(&lexer)
             if is_keyword(n.text) { break }
             append(&names, n.text)
         }
 
-        next := lexer_peek(&l)
+        next := lexer_peek(&lexer)
 
         if next.kind == .Double_Colon {
-            lexer_next(&l)
-            after := lexer_peek(&l)
+            lexer_next(&lexer)
+            after := lexer_peek(&lexer)
             if after.kind == .Identifier && after.text != "struct" && after.text != "enum" && after.text != "proc" && after.text != "union" {
-                type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
+                type_str := parse_type_until(&lexer, proc(k: Token_Kind, t: string) -> bool {
                     return k == .EOF || k == .Comma || k == .Open_Brace
                 })
                 if type_str != "" { vars[strings.clone(name)] = type_str }
             } else if after.kind == .String_Literal || after.kind == .Other {
-                type_str := peek_rhs_type(&l)
+                type_str := peek_rhs_type(&lexer)
                 if type_str != "" {
                     vars[strings.clone(name)] = type_str
                     if consts != nil {
@@ -1389,8 +1363,8 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
                         if after.kind == .String_Literal {
                             raw_val = after.text
                         } else {
-                            rhs_start := uintptr(raw_data(after.text)) - uintptr(raw_data(l.src))
-                            raw_val = strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                            rhs_start := uintptr(raw_data(after.text)) - uintptr(raw_data(lexer.src))
+                            raw_val = strings.trim_right(lexer.src[rhs_start:lexer.pos], " \t\r\n")
                             if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
                         }
                         if raw_val != "" { consts[strings.clone(name)] = strings.clone(raw_val) }
@@ -1401,25 +1375,25 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
         }
 
         if next.kind == .Colon {
-            lexer_next(&l)
-            type_tok := lexer_peek(&l)
+            lexer_next(&lexer)
+            type_tok := lexer_peek(&lexer)
 
             if type_tok.kind == .Other && type_tok.text == "=" {
-                lexer_next(&l)
+                lexer_next(&lexer)
                 for i in 0..<len(names) {
-                    type_str := peek_rhs_type(&l)
+                    type_str := peek_rhs_type(&lexer)
                     if type_str != "" { vars[strings.clone(names[i])] = type_str }
-                    if i < len(names)-1 && lexer_peek(&l).kind == .Comma { lexer_next(&l) }
+                    if i < len(names)-1 && lexer_peek(&lexer).kind == .Comma { lexer_next(&lexer) }
                 }
                 continue
             }
 
             if type_tok.kind == .Colon {
-                lexer_next(&l)
-                after := lexer_peek(&l)
+                lexer_next(&lexer)
+                after := lexer_peek(&lexer)
                 if after.kind == .Identifier && (after.text == "struct" || after.text == "enum" || after.text == "proc" || after.text == "union") {
                 } else if after.kind == .String_Literal || after.kind == .Other {
-                    type_str := peek_rhs_type(&l)
+                    type_str := peek_rhs_type(&lexer)
                     if type_str != "" {
                         for n in names { vars[strings.clone(n)] = type_str }
                         if consts != nil {
@@ -1427,15 +1401,15 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
                             if after.kind == .String_Literal {
                                 raw_val = after.text
                             } else {
-                                rhs_start := uintptr(raw_data(after.text)) - uintptr(raw_data(l.src))
-                                raw_val = strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                                rhs_start := uintptr(raw_data(after.text)) - uintptr(raw_data(lexer.src))
+                                raw_val = strings.trim_right(lexer.src[rhs_start:lexer.pos], " \t\r\n")
                                 if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
                             }
                             if raw_val != "" { for n in names { consts[strings.clone(n)] = strings.clone(raw_val) } }
                         }
                     }
                 } else if after.kind == .Identifier {
-                    type_str := peek_rhs_type(&l)
+                    type_str := peek_rhs_type(&lexer)
                     if type_str != "" { for n in names { vars[strings.clone(n)] = type_str } }
                 }
                 continue
@@ -1445,30 +1419,30 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
             start_line := type_tok.line
             depth := 0
             for {
-                pk := lexer_peek(&l)
-                if pk.kind == .EOF || pk.line > start_line { break }
-                if pk.kind == .Colon && depth == 0 { break }
-                if pk.kind == .Other && pk.text == "=" && depth == 0 { break }
-                if pk.kind == .Open_Brace || pk.kind == .Close_Brace || pk.kind == .Comma { break }
-                if pk.kind == .Other && pk.text == "(" { depth += 1 }
-                if pk.kind == .Other && pk.text == ")" && depth > 0 { depth -= 1 }
-                t := lexer_next(&l)
+                peeked := lexer_peek(&lexer)
+                if peeked.kind == .EOF || peeked.line > start_line { break }
+                if peeked.kind == .Colon && depth == 0 { break }
+                if peeked.kind == .Other && peeked.text == "=" && depth == 0 { break }
+                if peeked.kind == .Open_Brace || peeked.kind == .Close_Brace || peeked.kind == .Comma { break }
+                if peeked.kind == .Other && peeked.text == "(" { depth += 1 }
+                if peeked.kind == .Other && peeked.text == ")" && depth > 0 { depth -= 1 }
+                t := lexer_next(&lexer)
                 if t.text != "" { append(&type_parts, t.text) }
             }
             type_str := strings.join(type_parts[:], "")
 
             if type_str != "" && !is_keyword(type_str) {
                 for n in names { vars[strings.clone(n)] = type_str }
-                if consts != nil && lexer_peek(&l).kind == .Colon {
-                    lexer_next(&l)
-                    val_tok   := lexer_peek(&l)
-                    skip_to_next_statement(&l)
+                if consts != nil && lexer_peek(&lexer).kind == .Colon {
+                    lexer_next(&lexer)
+                    val_tok   := lexer_peek(&lexer)
+                    skip_to_next_statement(&lexer)
                     raw_val : string
                     if val_tok.kind == .String_Literal {
                         raw_val = val_tok.text
                     } else if val_tok.kind == .Identifier || val_tok.kind == .Other {
-                        rhs_start := uintptr(raw_data(val_tok.text)) - uintptr(raw_data(l.src))
-                        raw_val = strings.trim_right(l.src[rhs_start:l.pos], " \t\r\n")
+                        rhs_start := uintptr(raw_data(val_tok.text)) - uintptr(raw_data(lexer.src))
+                        raw_val = strings.trim_right(lexer.src[rhs_start:lexer.pos], " \t\r\n")
                         if nl := strings.index_byte(raw_val, '\n'); nl >= 0 { raw_val = strings.trim_right(raw_val[:nl], " \t\r") }
                     }
                     if raw_val != "" { for n in names { consts[strings.clone(n)] = strings.clone(raw_val) } }
@@ -1483,27 +1457,50 @@ resolve_local_var_type :: proc(local_ctx: string, var_name: string) -> (string, 
     vars := parse_local_vars(local_ctx)
     defer delete(vars)
 
-    if t, ok := vars[var_name]; ok {
-        if defn, is_proc := g_index.own_procs[t]; is_proc && len(defn.returns) > 0 {
-            return strings.clone(defn.returns[0]), true
-        }
-        return strings.clone(t), true
-    }
-
     first_line := local_ctx
     if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
+    params: map[string]string
     if start := strings.index_byte(first_line, '('); start >= 0 {
-        if t, ok := param_type_from_sig(first_line[start:], var_name); ok { return t, true }
+        params = params_from_sig(first_line[start:])
     }
+    defer delete(params)
+
+    resolve :: proc(t: string, vars: map[string]string, params: map[string]string) -> string {
+        current := t
+        for hops := 0; hops < 10; hops += 1 {
+            if next, ok := vars[current];   ok && next != current { current = next; continue }
+            if next, ok := params[current]; ok && next != current { current = next; continue }
+            break
+        }
+        return current
+    }
+
+    if t, ok := vars[var_name]; ok {
+        resolved := resolve(t, vars, params)
+        if defn, is_proc := g_index.own_procs[resolved]; is_proc && len(defn.returns) > 0 {
+            return strings.clone(defn.returns[0]), true
+        }
+        return strings.clone(resolved), true
+    }
+
+    if t, ok := params[var_name]; ok { return t, true }
 
     return "", false
 }
 
 param_type_from_sig :: proc(sig: string, var_name: string) -> (string, bool) {
-    l := lexer_make(sig)
+    params := params_from_sig(sig)
+    defer delete(params)
+    t, ok := params[var_name]
+    return t, ok
+}
+
+params_from_sig :: proc(sig: string) -> map[string]string {
+    out   := make(map[string]string)
+    lexer     := lexer_make(sig)
     depth := 0
     for {
-        tok := lexer_next(&l)
+        tok := lexer_next(&lexer)
         if tok.kind == .EOF { break }
         if tok.kind == .Other {
             if tok.text == "(" { depth += 1 }
@@ -1513,21 +1510,30 @@ param_type_from_sig :: proc(sig: string, var_name: string) -> (string, bool) {
         if tok.kind != .Identifier || depth == 0 { continue }
         names := make([dynamic]string, context.temp_allocator)
         append(&names, tok.text)
-        for lexer_peek(&l).kind == .Comma {
-            lexer_next(&l)
-            nxt := lexer_peek(&l)
-            if nxt.kind != .Identifier { break }
-            append(&names, lexer_next(&l).text)
+        for lexer_peek(&lexer).kind == .Comma {
+            lexer_next(&lexer)
+            next_tok := lexer_peek(&lexer)
+            if next_tok.kind != .Identifier { break }
+            append(&names, lexer_next(&lexer).text)
         }
-        if lexer_peek(&l).kind != .Colon { continue }
-        lexer_next(&l)
-        type_str := parse_type_until(&l, proc(k: Token_Kind, t: string) -> bool {
+        if lexer_peek(&lexer).kind != .Colon { continue }
+        lexer_next(&lexer)
+        type_str := parse_type_until(&lexer, proc(k: Token_Kind, t: string) -> bool {
             return k == .EOF || k == .Comma || (k == .Other && (t == ")" || t == "="))
         })
         if type_str == "" { continue }
-        for n in names { if n == var_name { return type_str, true } }
+        for n in names { out[strings.clone(n)] = type_str }
     }
-    return "", false
+    return out
+}
+
+proc_name_from_ctx :: proc(local_ctx: string) -> string {
+    first_line := local_ctx
+    if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
+    lexer := lexer_make(first_line)
+    tok := lexer_next(&lexer)
+    if tok.kind == .Identifier { return tok.text }
+    return ""
 }
 
 format_struct :: proc(name: string, defn: Struct_Definition) -> string {
@@ -1652,21 +1658,37 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
     defer delete(local_consts)
     vars := parse_local_vars(local_ctx, &local_consts)
     defer delete(vars)
+
+    first_line := local_ctx
+    if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
+    params: map[string]string
+    if start := strings.index_byte(first_line, '('); start >= 0 {
+        params = params_from_sig(first_line[start:])
+    }
+    defer delete(params)
+
+    resolve_type :: proc(t: string, vars: map[string]string, params: map[string]string) -> string {
+        current := t
+        for hops := 0; hops < 10; hops += 1 {
+            if next, ok := vars[current];   ok && next != current { current = next; continue }
+            if next, ok := params[current]; ok && next != current { current = next; continue }
+            break
+        }
+        return current
+    }
+
     if v, ok := local_consts[symbol]; ok { return v }
     if t, ok := vars[symbol]; ok {
-        if defn, is_proc := g_index.own_procs[t]; is_proc && len(defn.returns) > 0 {
+        resolved := resolve_type(t, vars, params)
+        if defn, is_proc := g_index.own_procs[resolved]; is_proc && len(defn.returns) > 0 {
             type_name = defn.returns[0]
         } else {
-            type_name = t
+            type_name = resolved
         }
+    } else if t, ok := params[symbol]; ok {
+        type_name = t
     } else if t, ok := g_index.own_variables[symbol]; ok {
         type_name = t
-    } else {
-        first_line := local_ctx
-        if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
-        if start := strings.index_byte(first_line, '('); start >= 0 {
-            if t, ok := param_type_from_sig(first_line[start:], symbol); ok { type_name = t }
-        }
     }
 
     if type_name != "" {
@@ -1726,7 +1748,7 @@ completions_from_package :: proc(alias: string, prefix: string) -> string {
 
 Completion_Kind :: enum { Own_Variable, Own_Enum, Own_Union, Own_Proc, Own_Struct, Imported_Enum, Imported_Struct }
 
-completions_unqualified :: proc(prefix: string, current_file: string) -> string {
+completions_unqualified :: proc(prefix: string, current_file: string, local_ctx: string) -> string {
     current_basename := path_basename(current_file)
 
     symbol_basename := proc(name: string) -> string {
@@ -1765,6 +1787,33 @@ completions_unqualified :: proc(prefix: string, current_file: string) -> string 
         menu   := fmt.tprintf("%s · %s", source, detail) if source != "" else detail
         key    := fmt.tprintf("%s%s\x01%d\x01%s", bucket, source, int(kind), name)
         append(lines, fmt.tprintf("%s\x00%s\t%s", key, name, menu))
+    }
+
+    proc_name := proc_name_from_ctx(local_ctx)
+    if proc_name != "" {
+        first_line := local_ctx
+        if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
+
+        local_vars := parse_local_vars(local_ctx)
+        defer delete(local_vars)
+        for name, type_str in local_vars {
+            if !strings.has_prefix(name, prefix) { continue }
+            menu := fmt.tprintf("%s · %s", proc_name, type_str)
+            key  := fmt.tprintf("-\x01%d\x01%s", int(Completion_Kind.Own_Variable), name)
+            append(&lines, fmt.tprintf("%s\x00%s\t%s", key, name, menu))
+        }
+
+        if start := strings.index_byte(first_line, '('); start >= 0 {
+            params := params_from_sig(first_line[start:])
+            defer delete(params)
+            for name, type_str in params {
+                if !strings.has_prefix(name, prefix) { continue }
+                if name in local_vars { continue }
+                menu := fmt.tprintf("%s · %s", proc_name, type_str)
+                key  := fmt.tprintf("-\x01%d\x01%s", int(Completion_Kind.Own_Variable), name)
+                append(&lines, fmt.tprintf("%s\x00%s\t%s", key, name, menu))
+            }
+        }
     }
 
     for name, defn in g_index.own_structs {
@@ -1848,7 +1897,7 @@ completions_for_type :: proc(type_name: string, prefix: string, local_ctx: strin
 }
 
 completions_for_request :: proc(prefix: string, dot_chain: string, local_ctx: string, current_file: string) -> string {
-    if dot_chain == "" { return completions_unqualified(prefix, current_file) }
+    if dot_chain == "" { return completions_unqualified(prefix, current_file, local_ctx) }
 
     segments      := strings.split(dot_chain, ".")
     defer delete(segments)
@@ -1921,18 +1970,24 @@ fd_write_all :: proc(fd: posix.FD, buf: []u8) -> bool {
 
 INLINE_FRAME_CAP :: 4096
 
+write_hex8 :: proc(buf: []u8, n: int) {
+    digits := "0123456789abcdef"
+    v := u32(n)
+    for i := 7; i >= 0; i -= 1 { buf[i] = digits[v & 0xf]; v >>= 4 }
+}
+
 write_frame :: proc(fd: posix.FD, msg: string) -> bool {
     body := transmute([]u8)msg
     n    := len(body)
     if n+8 <= INLINE_FRAME_CAP {
         buf: [INLINE_FRAME_CAP]u8
-        fmt.bprintf(buf[:8], "%08x", n)
+        write_hex8(buf[:8], n)
         copy(buf[8:], body)
         return fd_write_all(fd, buf[:8+n])
     }
-    hdr_str := fmt.tprintf("%08x", n)
-    hdr  := transmute([]u8)hdr_str
-    return fd_write_all(fd, hdr) && fd_write_all(fd, body)
+    hdr: [8]u8
+    write_hex8(hdr[:], n)
+    return fd_write_all(fd, hdr[:]) && fd_write_all(fd, body)
 }
 
 read_frame :: proc(fd: posix.FD, allocator := context.allocator) -> (string, bool) {
@@ -2063,8 +2118,8 @@ handle_client :: proc(client_fd: posix.FD) {
             local_ctx, ctx_ok := read_frame(client_fd, context.temp_allocator); if !ctx_ok { return }
 
             context.allocator = context.temp_allocator
-            file, line, col, ok := goto_def(sym, local_ctx)
-            if ok {
+            file, line, col, found := goto_def(sym, local_ctx)
+            if found {
                 write_frame(client_fd, fmt.tprintf("%s\x00%d\x00%d", file, line, col))
             } else {
                 write_frame(client_fd, "")

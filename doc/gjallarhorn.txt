@@ -5,13 +5,13 @@ Author: solver42
 ============================================================================
 COMPLETION                              *gjallarhorn-completion*
 
-Type Ctrl+X Ctrl+U to get completions. Use Ctrl+N / Ctrl+P to navigate.
+Type Ctrl+X Ctrl+O to get completions. Use Ctrl+N / Ctrl+P to navigate.
 
 Completions for:
 - Struct fields, enum values, type aliases
 - Imported library symbols
+- Local variables
 - Chained member access (e.g. "a.b.c.")
-- Unqualified prefix match (struct, enum, variable)
 
 ============================================================================
 HOVER                                   *gjallarhorn-hover*
