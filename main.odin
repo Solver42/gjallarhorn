@@ -1,23 +1,31 @@
 package gjallarhorn
 
-import "core:hash/xxhash"
 import "core:fmt"
+import "core:hash/xxhash"
+import "core:mem"
+import "core:mem/virtual"
 import "core:os"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
-import "core:mem"
-import "core:mem/virtual"
+import "core:time"
 import "core:unicode/utf8"
 
-indent_spaces : string = "    "
+g_indent_spaces        : string = "    "
+g_socket_path_c        : cstring
+g_project_root_markers : []string
+g_package_cache        : map[string]Package_Symbols
+g_package_arena        : virtual.Arena
+g_odin_root            : string
+g_persistent_allocator : mem.Allocator
+g_index                : Project_Index
+g_file_hash_cache      : map[string]u64
+g_file_symbols         : map[string]File_Symbol_Names
+g_symbol_basename      : map[string]string
 
-g_project_root  : string
-g_socket_path_c : cstring
-
-project_root_markers        : []string
-dirs_excluded_from_indexing :: []string{"vendor"}
+DIRS_EXCLUEDE_FROM_INDEXING :: []string{"vendor"}
+DEV :: #config(DEV, false)
 
 Struct_Field :: struct {
     name : string,
@@ -59,9 +67,6 @@ Package_Symbols :: struct {
     variables : map[string]string,
 }
 
-g_package_cache : map[string]Package_Symbols
-g_package_arena : virtual.Arena
-g_odin_root     : string
 
 Project_Index :: struct {
     own_structs              : map[string]Struct_Definition,
@@ -81,11 +86,6 @@ Project_Index :: struct {
     imported_enum_conflicts  : map[string][dynamic]string,
 }
 
-g_persistent_allocator : mem.Allocator
-g_index                : Project_Index
-
-g_file_hash_cache : map[string]u64
-
 File_Symbol_Names :: struct {
     struct_names   : [dynamic]string,
     enum_names     : [dynamic]string,
@@ -95,9 +95,6 @@ File_Symbol_Names :: struct {
     import_aliases : map[string]string,
     basename       : string,
 }
-g_file_symbols : map[string]File_Symbol_Names
-
-
 
 make_project_index :: proc() -> Project_Index {
     return Project_Index{
@@ -246,7 +243,7 @@ lexer_peek :: proc(lexer: ^Lexer) -> Token {
 }
 
 dir_contains_root_marker :: proc(dir: string) -> bool {
-    for m in project_root_markers {
+    for m in g_project_root_markers {
         path := strings.concatenate({dir, "/", m}, context.temp_allocator)
         if _, err := os.stat(path, context.temp_allocator); err == nil { return true }
     }
@@ -394,11 +391,23 @@ peek_rhs_type :: proc(lexer: ^Lexer) -> string {
         switch tok.text {
         case "true", "false": skip_rhs_value(lexer); return "bool"
         case "nil":           skip_rhs_value(lexer); return ""
+        case "make", "new":
+            lexer_next(lexer)
+            if lexer_peek(lexer).kind == .Other && lexer_peek(lexer).text == "(" {
+                lexer_next(lexer)
+                type_str := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
+                    return kind == .EOF || kind == .Comma || (kind == .Other && t == ")")
+                })
+                skip_rhs_value(lexer)
+                return type_str
+            }
+            skip_rhs_value(lexer)
+            return ""
         }
     }
-    type_str := parse_type_until(lexer, proc(k: Token_Kind, t: string) -> bool {
-        return k == .EOF || k == .Open_Brace || k == .Colon ||
-               (k == .Other && (t == "=" || t == "("))
+    type_str := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
+        return kind == .EOF || kind == .Open_Brace || kind == .Colon ||
+               (kind == .Other && (t == "=" || t == "("))
     }, tok.line)
     skip_rhs_value(lexer)
     return type_str
@@ -447,8 +456,8 @@ parse_decl_rhs :: proc(lexer: ^Lexer, name: string, loc: Symbol_Ref, result: ^Fi
             return
         case "distinct":
             lexer_next(lexer)
-            type_str := parse_type_until(lexer, proc(k: Token_Kind, t: string) -> bool {
-                return k == .EOF || k == .Comma || k == .Open_Brace
+            type_str := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
+                return kind == .EOF || kind == .Comma || kind == .Open_Brace
             })
             if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
             return
@@ -459,8 +468,8 @@ parse_decl_rhs :: proc(lexer: ^Lexer, name: string, loc: Symbol_Ref, result: ^Fi
             result.own_constants[strings.clone(name)] = strings.clone(after.text)
             return
         }
-        type_str := parse_type_until(lexer, proc(k: Token_Kind, t: string) -> bool {
-            return k == .EOF || k == .Comma || k == .Open_Brace
+        type_str := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
+            return kind == .EOF || kind == .Comma || kind == .Open_Brace
         })
         if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
         return
@@ -660,8 +669,8 @@ parse_struct_body :: proc(lexer: ^Lexer) -> Struct_Definition {
             if lexer_peek(lexer).kind != .Colon { continue }
             lexer_next(lexer)
 
-            field_type := parse_type_until(lexer, proc(k: Token_Kind, t: string) -> bool {
-                return k == .EOF || k == .Comma || k == .Close_Brace
+            field_type := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
+                return kind == .EOF || kind == .Comma || kind == .Close_Brace
             })
             if lexer_peek(lexer).kind == .Comma { lexer_next(lexer) }
 
@@ -702,8 +711,8 @@ parse_union_body :: proc(lexer: ^Lexer) -> Union_Definition {
     for { tok := lexer_next(lexer); if tok.kind == .EOF { return defn }; if tok.kind == .Open_Brace { break } }
     for {
         if lexer_peek(lexer).kind == .EOF || lexer_peek(lexer).kind == .Close_Brace { lexer_next(lexer); return defn }
-        variant := parse_type_until(lexer, proc(k: Token_Kind, t: string) -> bool {
-            return k == .EOF || k == .Comma || k == .Close_Brace
+        variant := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
+            return kind == .EOF || kind == .Comma || kind == .Close_Brace
         })
         if variant != "" { append(&defn.variants, variant) }
         if lexer_peek(lexer).kind == .Comma { lexer_next(lexer) }
@@ -990,7 +999,7 @@ resolve_and_load_imports :: proc(idx: ^Project_Index, source_dir: string) {
 
 dir_should_be_skipped :: proc(name: string) -> bool {
     if len(name) > 0 && name[0] == '.' { return true }
-    for excluded in dirs_excluded_from_indexing { if name == excluded { return true } }
+    for excluded in DIRS_EXCLUEDE_FROM_INDEXING { if name == excluded { return true } }
     return false
 }
 
@@ -1018,10 +1027,15 @@ index_one_file :: proc(path: string, src: string) -> File_Parse_Result {
         syms.import_aliases[strings.clone(alias)] = strings.clone(imp)
     }
     g_file_symbols[path] = syms
+    for name in result.own_structs   { g_symbol_basename[strings.clone(name)] = syms.basename }
+    for name in result.own_enums     { g_symbol_basename[strings.clone(name)] = syms.basename }
+    for name in result.own_unions    { g_symbol_basename[strings.clone(name)] = syms.basename }
+    for name in result.own_procs     { g_symbol_basename[strings.clone(name)] = syms.basename }
+    for name in result.own_variables { g_symbol_basename[strings.clone(name)] = syms.basename }
+
 
     return result
 }
-
 
 index_project_tree :: proc(project_root: string) -> (Project_Index, [dynamic]string) {
     idx          := make_project_index()
@@ -1139,7 +1153,8 @@ build_index :: proc(project_root: string) {
     project_index_destroy(&g_index)
     package_cache_destroy()
 
-    g_package_cache = make(map[string]Package_Symbols)
+    g_package_cache   = make(map[string]Package_Symbols)
+    g_symbol_basename = make(map[string]string)
 
     new_index, visited_dirs := index_project_tree(project_root)
     for dir in visited_dirs { load_package_symbols(dir) }
@@ -1153,11 +1168,18 @@ reindex_from_content :: proc(path: string, was_cached: bool, src: []u8) {
     p := path if was_cached else strings.clone(path, g_persistent_allocator)
 
     if old_syms, ok := g_file_symbols[p]; ok {
+
         for name in old_syms.struct_names   { delete_key(&g_index.own_structs,   name) }
         for name in old_syms.enum_names     { delete_key(&g_index.own_enums,     name) }
         for name in old_syms.union_names    { delete_key(&g_index.own_unions,    name) }
         for name in old_syms.proc_names     { delete_key(&g_index.own_procs,     name) }
         for name in old_syms.variable_names { delete_key(&g_index.own_variables, name); delete_key(&g_index.own_variable_locs, name); delete_key(&g_index.own_constants, name) }
+
+        for name in old_syms.struct_names   { delete_key(&g_symbol_basename, name) }
+        for name in old_syms.enum_names     { delete_key(&g_symbol_basename, name) }
+        for name in old_syms.union_names    { delete_key(&g_symbol_basename, name) }
+        for name in old_syms.proc_names     { delete_key(&g_symbol_basename, name) }
+        for name in old_syms.variable_names { delete_key(&g_symbol_basename, name) }
     }
 
     file_result := index_one_file(p, string(src))
@@ -1217,8 +1239,12 @@ rebuild_index :: proc(trigger_file: string) {
 }
 
 rebuild_index_from_buf :: proc(path: string, src: string) {
-    _, was_cached := g_file_hash_cache[path]
-    reindex_from_content(path, was_cached, transmute([]u8)src)
+    raw         := transmute([]u8)src
+    hash        := file_hash(raw)
+    cached_hash, was_cached := g_file_hash_cache[path]
+    if was_cached && cached_hash == hash { return }
+    reindex_from_content(path, was_cached, raw)
+    g_file_hash_cache[path if was_cached else strings.clone(path, g_persistent_allocator)] = hash
 }
 
 split_at_dot :: proc(name: string) -> (before, after: string, found: bool) {
@@ -1250,6 +1276,21 @@ resolve_name_to_type :: proc(name: string, local_ctx: string) -> string {
     if t := resolve_to_known_type(name); t != "" { return t }
     if t, ok := resolve_local_var_type(local_ctx, name); ok { return t }
     return ""
+}
+
+params_from_ctx :: proc(local_ctx: string) -> map[string]string {
+    out := make(map[string]string)
+    ctx := local_ctx
+    for line in strings.split_lines_iterator(&ctx) {
+        if start := strings.index_byte(line, '('); start >= 0 {
+            if strings.contains(line[:start], "proc") {
+                inner := params_from_sig(line[start:])
+                for k, v in inner { out[k] = v }
+                delete(inner)
+            }
+        }
+    }
+    return out
 }
 
 parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[string]string {
@@ -1303,7 +1344,12 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
                 if raw_type == "" { raw_type = g_index.own_variables[iter_name] }
                 if strings.has_prefix(raw_type, "[") {
                     if close := strings.index_byte(raw_type, ']'); close >= 0 {
-                        elem_type = raw_type[close+1:]
+                        if len(loop_vars) == 2 {
+                            vars[strings.clone(loop_vars[0])] = raw_type[close+1:]
+                            vars[strings.clone(loop_vars[1])] = "int"
+                        } else {
+                            elem_type = raw_type[close+1:]
+                        }
                     }
                 } else if strings.has_prefix(raw_type, "map[") {
                     if close := strings.index_byte(raw_type, ']'); close >= 0 {
@@ -1349,9 +1395,13 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
         if next.kind == .Double_Colon {
             lexer_next(&lexer)
             after := lexer_peek(&lexer)
-            if after.kind == .Identifier && after.text != "struct" && after.text != "enum" && after.text != "proc" && after.text != "union" {
-                type_str := parse_type_until(&lexer, proc(k: Token_Kind, t: string) -> bool {
-                    return k == .EOF || k == .Comma || k == .Open_Brace
+            if after.kind == .Identifier && after.text == "proc" {
+                lexer_next(&lexer)
+                p := parse_proc_signature(&lexer)
+                vars[strings.clone(name)] = fmt.tprintf("proc%s", proc_signature_summary(p))
+            } else if after.kind == .Identifier && after.text != "struct" && after.text != "enum" && after.text != "union" {
+                type_str := parse_type_until(&lexer, proc(kind: Token_Kind, t: string) -> bool {
+                    return kind == .EOF || kind == .Comma || kind == .Open_Brace
                 })
                 if type_str != "" { vars[strings.clone(name)] = type_str }
             } else if after.kind == .String_Literal || after.kind == .Other {
@@ -1453,16 +1503,41 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
     return vars
 }
 
+parse_local_types :: proc(local_ctx: string) -> (map[string]Struct_Definition, map[string]Enum_Definition) {
+    structs := make(map[string]Struct_Definition)
+    enums   := make(map[string]Enum_Definition)
+    lexer   := lexer_make(local_ctx)
+    depth   := 0
+    for {
+        tok := lexer_next(&lexer)
+        if tok.kind == .EOF        { break }
+        if tok.kind == .Open_Brace  { depth += 1; continue }
+        if tok.kind == .Close_Brace { if depth > 0 { depth -= 1 }; continue }
+        if tok.kind != .Identifier || depth != 1 { continue }
+        name := tok.text
+        if lexer_peek(&lexer).kind != .Double_Colon { continue }
+        lexer_next(&lexer)
+        after := lexer_peek(&lexer)
+        if after.kind != .Identifier { continue }
+        switch after.text {
+        case "struct":
+            lexer_next(&lexer)
+            s := parse_struct_body(&lexer)
+            structs[strings.clone(name)] = s
+        case "enum":
+            lexer_next(&lexer)
+            e := parse_enum_body(&lexer)
+            enums[strings.clone(name)] = e
+        }
+    }
+    return structs, enums
+}
+
 resolve_local_var_type :: proc(local_ctx: string, var_name: string) -> (string, bool) {
     vars := parse_local_vars(local_ctx)
     defer delete(vars)
 
-    first_line := local_ctx
-    if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
-    params: map[string]string
-    if start := strings.index_byte(first_line, '('); start >= 0 {
-        params = params_from_sig(first_line[start:])
-    }
+    params := params_from_ctx(local_ctx)
     defer delete(params)
 
     resolve :: proc(t: string, vars: map[string]string, params: map[string]string) -> string {
@@ -1488,42 +1563,55 @@ resolve_local_var_type :: proc(local_ctx: string, var_name: string) -> (string, 
     return "", false
 }
 
-param_type_from_sig :: proc(sig: string, var_name: string) -> (string, bool) {
-    params := params_from_sig(sig)
-    defer delete(params)
-    t, ok := params[var_name]
-    return t, ok
-}
-
 params_from_sig :: proc(sig: string) -> map[string]string {
     out   := make(map[string]string)
-    lexer     := lexer_make(sig)
+    lexer := lexer_make(sig)
     depth := 0
+
+    parse_named_list :: proc(lexer: ^Lexer, out: ^map[string]string, depth: ^int) {
+        for {
+            tok := lexer_next(lexer)
+            if tok.kind == .EOF { return }
+            if tok.kind == .Other {
+                if tok.text == "(" { depth^ += 1 }
+                if tok.text == ")" { if depth^ > 0 { depth^ -= 1 }; if depth^ == 0 { return } }
+                continue
+            }
+            if tok.kind != .Identifier || depth^ == 0 { continue }
+            names := make([dynamic]string, context.temp_allocator)
+            append(&names, tok.text)
+            for lexer_peek(lexer).kind == .Comma {
+                lexer_next(lexer)
+                next_tok := lexer_peek(lexer)
+                if next_tok.kind != .Identifier { break }
+                append(&names, lexer_next(lexer).text)
+            }
+            if lexer_peek(lexer).kind != .Colon { continue }
+            lexer_next(lexer)
+            type_str := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
+                return kind == .EOF || kind == .Comma || (kind == .Other && (t == ")" || t == "="))
+            })
+            if type_str == "" { continue }
+            for n in names { out[strings.clone(n)] = type_str }
+        }
+    }
+
+    parse_named_list(&lexer, &out, &depth)
+
     for {
         tok := lexer_next(&lexer)
         if tok.kind == .EOF { break }
-        if tok.kind == .Other {
-            if tok.text == "(" { depth += 1 }
-            if tok.text == ")" { if depth > 0 { depth -= 1 }; if depth == 0 { break } }
-            continue
+        if tok.kind == .Other && tok.text == "-" {
+            if lexer_peek(&lexer).kind == .Other && lexer_peek(&lexer).text == ">" {
+                lexer_next(&lexer)
+                if lexer_peek(&lexer).kind == .Other && lexer_peek(&lexer).text == "(" {
+                    parse_named_list(&lexer, &out, &depth)
+                }
+            }
+            break
         }
-        if tok.kind != .Identifier || depth == 0 { continue }
-        names := make([dynamic]string, context.temp_allocator)
-        append(&names, tok.text)
-        for lexer_peek(&lexer).kind == .Comma {
-            lexer_next(&lexer)
-            next_tok := lexer_peek(&lexer)
-            if next_tok.kind != .Identifier { break }
-            append(&names, lexer_next(&lexer).text)
-        }
-        if lexer_peek(&lexer).kind != .Colon { continue }
-        lexer_next(&lexer)
-        type_str := parse_type_until(&lexer, proc(k: Token_Kind, t: string) -> bool {
-            return k == .EOF || k == .Comma || (k == .Other && (t == ")" || t == "="))
-        })
-        if type_str == "" { continue }
-        for n in names { out[strings.clone(n)] = type_str }
     }
+
     return out
 }
 
@@ -1542,7 +1630,7 @@ format_struct :: proc(name: string, defn: Struct_Definition) -> string {
     sb := strings.builder_make()
     strings.write_string(&sb, name); strings.write_string(&sb, " struct\n")
     for f in defn.fields {
-        strings.write_string(&sb, indent_spaces)
+        strings.write_string(&sb, g_indent_spaces)
         strings.write_string(&sb, f.name)
         for _ in 0..<max_len-len(f.name) { strings.write_byte(&sb, ' ') }
         strings.write_byte(&sb, ' ')
@@ -1555,7 +1643,7 @@ format_enum :: proc(name: string, defn: Enum_Definition) -> string {
     sb := strings.builder_make()
     strings.write_string(&sb, name); strings.write_string(&sb, " enum\n")
     for v in defn.values {
-        strings.write_string(&sb, indent_spaces); strings.write_string(&sb, v); strings.write_byte(&sb, '\n')
+        strings.write_string(&sb, g_indent_spaces); strings.write_string(&sb, v); strings.write_byte(&sb, '\n')
     }
     return strings.to_string(sb)
 }
@@ -1564,7 +1652,7 @@ format_union :: proc(name: string, defn: Union_Definition) -> string {
     sb := strings.builder_make()
     strings.write_string(&sb, name); strings.write_string(&sb, " union\n")
     for v in defn.variants {
-        strings.write_string(&sb, indent_spaces); strings.write_string(&sb, v); strings.write_byte(&sb, '\n')
+        strings.write_string(&sb, g_indent_spaces); strings.write_string(&sb, v); strings.write_byte(&sb, '\n')
     }
     return strings.to_string(sb)
 }
@@ -1573,11 +1661,11 @@ format_proc :: proc(name: string, defn: Proc_Definition) -> string {
     sb := strings.builder_make()
     strings.write_string(&sb, name); strings.write_string(&sb, " proc")
     for p in defn.params {
-        strings.write_byte(&sb, '\n'); strings.write_string(&sb, indent_spaces)
+        strings.write_byte(&sb, '\n'); strings.write_string(&sb, g_indent_spaces)
         strings.write_string(&sb, "<- "); strings.write_string(&sb, p)
     }
     for r in defn.returns {
-        strings.write_byte(&sb, '\n'); strings.write_string(&sb, indent_spaces)
+        strings.write_byte(&sb, '\n'); strings.write_string(&sb, g_indent_spaces)
         strings.write_string(&sb, "-> "); strings.write_string(&sb, r)
     }
     return strings.to_string(sb)
@@ -1631,6 +1719,12 @@ qualifier_from_ctx :: proc(local_ctx: string, symbol: string) -> string {
 }
 
 hover_info :: proc(symbol: string, local_ctx: string) -> string {
+    local_structs, local_enums := parse_local_types(local_ctx)
+    defer delete(local_structs)
+    defer delete(local_enums)
+    if d, ok := local_structs[symbol]; ok { return format_struct(symbol, d) }
+    if d, ok := local_enums[symbol];   ok { return format_enum(symbol, d)   }
+
     if d, ok := g_index.own_structs[symbol]; ok { return format_struct(symbol, d) }
     if d, ok := g_index.own_enums[symbol];   ok { return format_enum(symbol, d)   }
     if d, ok := g_index.own_unions[symbol];  ok { return format_union(symbol, d)  }
@@ -1659,12 +1753,7 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
     vars := parse_local_vars(local_ctx, &local_consts)
     defer delete(vars)
 
-    first_line := local_ctx
-    if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
-    params: map[string]string
-    if start := strings.index_byte(first_line, '('); start >= 0 {
-        params = params_from_sig(first_line[start:])
-    }
+    params := params_from_ctx(local_ctx)
     defer delete(params)
 
     resolve_type :: proc(t: string, vars: map[string]string, params: map[string]string) -> string {
@@ -1698,6 +1787,8 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
         if type_name in g_index.imported_enum_conflicts {
             return fmt.tprintf("%s: ambiguous (defined in %s)", symbol, strings.join(g_index.imported_enum_conflicts[type_name][:], ", "))
         }
+        if d, ok := local_structs[type_name]; ok { return format_struct(type_name, d) }
+        if d, ok := local_enums[type_name];   ok { return format_enum(type_name, d)   }
         if s := hover_for_type(type_name); s != "" { return s }
         return fmt.tprintf("%s %s", symbol, type_name)
     }
@@ -1751,16 +1842,6 @@ Completion_Kind :: enum { Own_Variable, Own_Enum, Own_Union, Own_Proc, Own_Struc
 completions_unqualified :: proc(prefix: string, current_file: string, local_ctx: string) -> string {
     current_basename := path_basename(current_file)
 
-    symbol_basename := proc(name: string) -> string {
-        for _, syms in g_file_symbols {
-            for n in syms.struct_names   { if n == name { return syms.basename } }
-            for n in syms.enum_names     { if n == name { return syms.basename } }
-            for n in syms.proc_names     { if n == name { return syms.basename } }
-            for n in syms.variable_names { if n == name { return syms.basename } }
-        }
-        return ""
-    }
-
     conflict_source :: proc(name: string, is_struct: bool) -> string {
         conflicts := g_index.imported_struct_conflicts[name] if is_struct else g_index.imported_enum_conflicts[name]
         sb := strings.builder_make(context.temp_allocator)
@@ -1779,40 +1860,55 @@ completions_unqualified :: proc(prefix: string, current_file: string, local_ctx:
         return imp if imp != "" else alias
     }
 
-    lines := make([dynamic]string, context.temp_allocator)
+    own  := strings.builder_make(context.temp_allocator)
+    rest := strings.builder_make(context.temp_allocator)
 
-    add :: proc(lines: ^[dynamic]string, current_basename: string,
-                name: string, source: string, detail: string, kind: Completion_Kind) {
-        bucket := "1" if source != current_basename else "0"
-        menu   := fmt.tprintf("%s · %s", source, detail) if source != "" else detail
-        key    := fmt.tprintf("%s%s\x01%d\x01%s", bucket, source, int(kind), name)
-        append(lines, fmt.tprintf("%s\x00%s\t%s", key, name, menu))
+    add :: proc(own: ^strings.Builder, rest: ^strings.Builder, current_basename: string,
+                name: string, source: string, detail: string) {
+        b := own if source == current_basename else rest
+        strings.write_string(b, name)
+        strings.write_byte(b, '\t')
+        if source != "" { strings.write_string(b, source); strings.write_string(b, " · ") }
+        strings.write_string(b, detail)
+        strings.write_byte(b, '\n')
     }
 
     proc_name := proc_name_from_ctx(local_ctx)
     if proc_name != "" {
-        first_line := local_ctx
-        if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
-
         local_vars := parse_local_vars(local_ctx)
         defer delete(local_vars)
         for name, type_str in local_vars {
             if !strings.has_prefix(name, prefix) { continue }
-            menu := fmt.tprintf("%s · %s", proc_name, type_str)
-            key  := fmt.tprintf("-\x01%d\x01%s", int(Completion_Kind.Own_Variable), name)
-            append(&lines, fmt.tprintf("%s\x00%s\t%s", key, name, menu))
+            strings.write_string(&own, name); strings.write_byte(&own, '\t')
+            strings.write_string(&own, proc_name); strings.write_string(&own, " · ")
+            strings.write_string(&own, type_str); strings.write_byte(&own, '\n')
         }
 
-        if start := strings.index_byte(first_line, '('); start >= 0 {
-            params := params_from_sig(first_line[start:])
-            defer delete(params)
-            for name, type_str in params {
-                if !strings.has_prefix(name, prefix) { continue }
-                if name in local_vars { continue }
-                menu := fmt.tprintf("%s · %s", proc_name, type_str)
-                key  := fmt.tprintf("-\x01%d\x01%s", int(Completion_Kind.Own_Variable), name)
-                append(&lines, fmt.tprintf("%s\x00%s\t%s", key, name, menu))
-            }
+        params := params_from_ctx(local_ctx)
+        defer delete(params)
+        for name, type_str in params {
+            if !strings.has_prefix(name, prefix) || name in local_vars { continue }
+            strings.write_string(&own, name); strings.write_byte(&own, '\t')
+            strings.write_string(&own, proc_name); strings.write_string(&own, " · ")
+            strings.write_string(&own, type_str); strings.write_byte(&own, '\n')
+        }
+
+        local_structs, local_enums := parse_local_types(local_ctx)
+        defer delete(local_structs)
+        defer delete(local_enums)
+        for name, defn in local_structs {
+            if !strings.has_prefix(name, prefix) { continue }
+            types := make([dynamic]string, context.temp_allocator)
+            for f in defn.fields { append(&types, f.type) }
+            strings.write_string(&own, name); strings.write_byte(&own, '\t')
+            strings.write_string(&own, proc_name); strings.write_string(&own, " · ")
+            strings.write_string(&own, strings.join(types[:], " ")); strings.write_byte(&own, '\n')
+        }
+        for name, defn in local_enums {
+            if !strings.has_prefix(name, prefix) { continue }
+            strings.write_string(&own, name); strings.write_byte(&own, '\t')
+            strings.write_string(&own, proc_name); strings.write_string(&own, " · ")
+            strings.write_string(&own, strings.join(defn.values[:], " ")); strings.write_byte(&own, '\n')
         }
     }
 
@@ -1820,23 +1916,23 @@ completions_unqualified :: proc(prefix: string, current_file: string, local_ctx:
         if !strings.has_prefix(name, prefix) { continue }
         types := make([dynamic]string, context.temp_allocator)
         for f in defn.fields { append(&types, f.type) }
-        add(&lines, current_basename, name, symbol_basename(name), strings.join(types[:], " "), .Own_Struct)
+        add(&own, &rest, current_basename, name, g_symbol_basename[name], strings.join(types[:], " "))
     }
     for name, defn in g_index.own_enums {
         if !strings.has_prefix(name, prefix) { continue }
-        add(&lines, current_basename, name, symbol_basename(name), strings.join(defn.values[:], " "), .Own_Enum)
+        add(&own, &rest, current_basename, name, g_symbol_basename[name], strings.join(defn.values[:], " "))
     }
     for name, defn in g_index.own_unions {
         if !strings.has_prefix(name, prefix) { continue }
-        add(&lines, current_basename, name, symbol_basename(name), strings.join(defn.variants[:], " "), .Own_Union)
+        add(&own, &rest, current_basename, name, g_symbol_basename[name], strings.join(defn.variants[:], " "))
     }
     for name, defn in g_index.own_procs {
         if !strings.has_prefix(name, prefix) { continue }
-        add(&lines, current_basename, name, symbol_basename(name), proc_signature_summary(defn), .Own_Proc)
+        add(&own, &rest, current_basename, name, g_symbol_basename[name], proc_signature_summary(defn))
     }
     for name, type_name in g_index.own_variables {
         if !strings.has_prefix(name, prefix) { continue }
-        add(&lines, current_basename, name, symbol_basename(name), type_name, .Own_Variable)
+        add(&own, &rest, current_basename, name, g_symbol_basename[name], type_name)
     }
     for name in g_index.all_imported_structs {
         if !strings.has_prefix(name, prefix) || name in g_index.own_structs { continue }
@@ -1844,24 +1940,18 @@ completions_unqualified :: proc(prefix: string, current_file: string, local_ctx:
         types  := make([dynamic]string, context.temp_allocator)
         for f in defn.fields { append(&types, f.type) }
         source := conflict_source(name, true) if name in g_index.imported_struct_conflicts else import_source(name, true)
-        add(&lines, current_basename, name, source, strings.join(types[:], " "), .Imported_Struct)
+        add(&own, &rest, current_basename, name, source, strings.join(types[:], " "))
     }
     for name in g_index.all_imported_enums {
         if !strings.has_prefix(name, prefix) || name in g_index.own_enums { continue }
         defn   := g_index.all_imported_enums[name]
         source := conflict_source(name, false) if name in g_index.imported_enum_conflicts else import_source(name, false)
-        add(&lines, current_basename, name, source, strings.join(defn.values[:], " "), .Imported_Enum)
+        add(&own, &rest, current_basename, name, source, strings.join(defn.values[:], " "))
     }
 
-    slice.sort(lines[:])
-
-    sb := strings.builder_make()
-    for line in lines {
-        if sep := strings.index_byte(line, '\x00'); sep >= 0 {
-            strings.write_string(&sb, line[sep+1:])
-            strings.write_byte(&sb, '\n')
-        }
-    }
+    sb := strings.builder_make(context.temp_allocator)
+    strings.write_string(&sb, strings.to_string(own))
+    strings.write_string(&sb, strings.to_string(rest))
     return strings.trim_right(strings.to_string(sb), "\n")
 }
 
@@ -2042,7 +2132,6 @@ daemon_start :: proc(initial_file: string) {
     g_socket_path_c  = socket_path_c
     posix.unlink(socket_path_c)
 
-    g_project_root = strings.clone(project_root)
     build_index(project_root)
 
     server_fd := posix.socket(.UNIX, .STREAM)
@@ -2057,6 +2146,13 @@ daemon_start :: proc(initial_file: string) {
     }
 
     fmt.eprintfln("socket:%s", socket_path)
+
+    when DEV {
+        log_path := fmt.aprintf("/tmp/gjallarhorn_%016x.log", xxhash.XXH64(transmute([]u8)project_root, 0))
+        defer delete(log_path)
+        log_file, log_err := os.open(log_path, os.O_WRONLY | os.O_CREATE | os.O_TRUNC)
+        if log_err == nil { os.stderr = log_file }
+    }
 
     daemon_accept_loop(server_fd)
 }
@@ -2089,7 +2185,9 @@ handle_client :: proc(client_fd: posix.FD) {
             local_ctx,    l_ok  := read_frame(client_fd, context.temp_allocator); if !l_ok  { return }
 
             context.allocator = context.temp_allocator
+            when DEV { t0 := time.now() }
             result := completions_for_request(prefix, dot_chain, local_ctx, current_file)
+            when DEV { fmt.eprintfln("comp: completions=%v bytes=%d", time.since(t0), len(result)) }
             write_frame(client_fd, result)
 
         case "comp_buf":
@@ -2100,10 +2198,16 @@ handle_client :: proc(client_fd: posix.FD) {
             local_ctx, l_ok    := read_frame(client_fd, context.temp_allocator); if !l_ok    { return }
 
             context.allocator = g_persistent_allocator
+            when DEV { t0 := time.now() }
             rebuild_index_from_buf(path, buf)
+            when DEV { fmt.eprintfln("comp_buf: rebuild=%v", time.since(t0)) }
             context.allocator = context.temp_allocator
+            when DEV { t1 := time.now() }
             result := completions_for_request(prefix, dot_chain, local_ctx, path)
+            when DEV { fmt.eprintfln("comp_buf: completions=%v bytes=%d", time.since(t1), len(result)) }
+            when DEV { t2 := time.now() }
             write_frame(client_fd, result)
+            when DEV { fmt.eprintfln("comp_buf: write=%v", time.since(t2)) }
 
         case "hover":
             sym,       sym_ok := read_frame(client_fd, context.temp_allocator); if !sym_ok { return }
@@ -2158,7 +2262,7 @@ main :: proc() {
                 filepath = os.args[i+1]
                 i += 1
             }
-            project_root_markers = os.args[i+1:]
+            g_project_root_markers = os.args[i+1:]
         }
     }
 

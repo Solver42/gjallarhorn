@@ -1,7 +1,12 @@
 # Gjallarhorn
 
 A lightweight Vim plugin for Odin: autocomplete, hover, and go to definition.
-It stays out of your way until you need it. If you want an IDE experience with rename, refactoring, diagnostics, code actions, and LSP support across many editors, [OLS](https://github.com/DanielGavin/ols) is the right choice.
+It stays out of your way until you need it.
+
+![some name](img/hover.png)
+![some name](img/autocomplete.png)
+
+If you want an IDE experience with refactoring, diagnostics, code actions, and LSP support across many editors, [OLS](https://github.com/DanielGavin/ols) is the right choice.
 
 Why use Gjallarhorn then?
 
@@ -65,6 +70,10 @@ For easier autocomplete access, remap Ctrl+Space in `.vimrc`:
 
 ```vim
 inoremap <silent> <NUL> <C-x><C-o>
+```
+or
+```vim
+inoremap <silent> <C-Space> <C-x><C-o>
 ```
 
 ## License

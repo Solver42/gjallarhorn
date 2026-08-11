@@ -101,7 +101,7 @@ def WarnIfDaemonNotStarted(root: string, _timer_id: number)
     endif
 enddef
 
-def EnsureDaemon(filepath: string)
+export def EnsureDaemon(filepath: string)
     if !executable(g:gjallarhorn_bin)
         echom 'gjallarhorn: binary not found at ' .. g:gjallarhorn_bin
         return
@@ -165,17 +165,29 @@ enddef
 def LocalCtx(): list<any>
     var cur        = line('.')
     var start_line = cur
-    if getline(cur) =~# '^\S.*::\s*proc\>'
-        return [cur, getline(cur, cur)->join("\n")]
-    endif
-    while start_line > 1
-        if getline(start_line - 1) =~# '^\S.*::\s*proc\>'
+    if getline(cur) !~# '^\S.*::\s*proc\>'
+        while start_line > 1
+            if getline(start_line - 1) =~# '^\S.*::\s*proc\>'
+                start_line -= 1
+                break
+            endif
             start_line -= 1
+        endwhile
+    endif
+    var depth    = 0
+    var end_line = start_line
+    var last     = line('$')
+    while end_line <= last
+        var ch = 0
+        for c in split(getline(end_line), '\zs')
+            if c ==# '{' | depth += 1 | elseif c ==# '}' | depth -= 1 | endif
+        endfor
+        if depth <= 0 && end_line > start_line
             break
         endif
-        start_line -= 1
+        end_line += 1
     endwhile
-    return [start_line, getline(start_line, cur)->join("\n")]
+    return [start_line, getline(start_line, end_line)->join("\n")]
 enddef
 
 export def IndexAsync(filepath: string)

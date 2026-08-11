@@ -1,3 +1,14 @@
+## 34
+
+### Fixed
+
+- Gjallarhorn starts when saving a new .odin file
+- Handle index in more loop cases
+- Resolve types on make and new
+- Nested procedures
+- Named return values
+- Resolve structs defined in the current procedure
+
 ## 33
 
 ### Added
