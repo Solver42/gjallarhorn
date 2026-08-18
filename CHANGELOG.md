@@ -1,3 +1,16 @@
+## 35
+
+### Added
+
+- Named loops
+
+### Fixed
+
+- Reuse existing daemon when opening a new file
+- Hover for procs from imported packages
+- Completions for unions and variables from packages
+- Go to definition for package-qualified and same-package symbols
+
 ## 34
 
 ### Fixed

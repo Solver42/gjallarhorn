@@ -24,7 +24,6 @@ g_file_hash_cache      : map[string]u64
 g_file_symbols         : map[string]File_Symbol_Names
 g_symbol_basename      : map[string]string
 
-DIRS_EXCLUEDE_FROM_INDEXING :: []string{"vendor"}
 DEV :: #config(DEV, false)
 
 Struct_Field :: struct {
@@ -60,30 +59,31 @@ Symbol_Ref :: struct {
 }
 
 Package_Symbols :: struct {
-    structs   : map[string]Struct_Definition,
-    enums     : map[string]Enum_Definition,
-    unions    : map[string]Union_Definition,
-    procs     : map[string]Proc_Definition,
-    variables : map[string]string,
+    structs       : map[string]Struct_Definition,
+    enums         : map[string]Enum_Definition,
+    unions        : map[string]Union_Definition,
+    procs         : map[string]Proc_Definition,
+    variables     : map[string]string,
+    variable_locs : map[string]Symbol_Ref,
 }
 
 
 Project_Index :: struct {
-    own_structs              : map[string]Struct_Definition,
-    own_enums                : map[string]Enum_Definition,
-    own_unions               : map[string]Union_Definition,
-    own_procs                : map[string]Proc_Definition,
-    own_variables            : map[string]string,
-    own_variable_locs        : map[string]Symbol_Ref,
-    own_constants            : map[string]string,
-    import_aliases           : map[string]string,
-    imported_package_dirs    : map[string]string,
-    all_imported_structs     : map[string]Struct_Definition,
-    all_imported_enums       : map[string]Enum_Definition,
-    imported_struct_sources  : map[string]string,
-    imported_enum_sources    : map[string]string,
-    imported_struct_conflicts: map[string][dynamic]string,
-    imported_enum_conflicts  : map[string][dynamic]string,
+    own_structs               : map[string]Struct_Definition,
+    own_enums                 : map[string]Enum_Definition,
+    own_unions                : map[string]Union_Definition,
+    own_procs                 : map[string]Proc_Definition,
+    own_variables             : map[string]string,
+    own_variable_locs         : map[string]Symbol_Ref,
+    own_constants             : map[string]string,
+    import_aliases            : map[string]string,
+    imported_package_dirs     : map[string]string,
+    all_imported_structs      : map[string]Struct_Definition,
+    all_imported_enums        : map[string]Enum_Definition,
+    imported_struct_sources   : map[string]string,
+    imported_enum_sources     : map[string]string,
+    imported_struct_conflicts : map[string][dynamic]string,
+    imported_enum_conflicts   : map[string][dynamic]string,
 }
 
 File_Symbol_Names :: struct {
@@ -97,7 +97,7 @@ File_Symbol_Names :: struct {
 }
 
 make_project_index :: proc() -> Project_Index {
-    return Project_Index{
+    return Project_Index {
         own_structs               = make(map[string]Struct_Definition),
         own_enums                 = make(map[string]Enum_Definition),
         own_unions                = make(map[string]Union_Definition),
@@ -118,7 +118,12 @@ make_project_index :: proc() -> Project_Index {
 
 Token_Kind :: enum { EOF, Identifier, String_Literal, Double_Colon, Open_Brace, Close_Brace, Comma, Colon, Hash, Other }
 
-Token :: struct { kind: Token_Kind, text: string, line: int, col: int }
+Token :: struct {
+    kind : Token_Kind,
+    text : string,
+    line : int,
+    col  : int,
+}
 
 Lexer :: struct {
     src      : string,
@@ -414,15 +419,15 @@ peek_rhs_type :: proc(lexer: ^Lexer) -> string {
 }
 
 File_Parse_Result :: struct {
-    file_path      : string,
-    own_structs    : map[string]Struct_Definition,
-    own_enums      : map[string]Enum_Definition,
-    own_unions     : map[string]Union_Definition,
-    own_procs      : map[string]Proc_Definition,
-    own_variables  : map[string]string,
+    file_path         : string,
+    own_structs       : map[string]Struct_Definition,
+    own_enums         : map[string]Enum_Definition,
+    own_unions        : map[string]Union_Definition,
+    own_procs         : map[string]Proc_Definition,
+    own_variables     : map[string]string,
     own_variable_locs : map[string]Symbol_Ref,
-    own_constants  : map[string]string,
-    import_aliases : map[string]string,
+    own_constants     : map[string]string,
+    import_aliases    : map[string]string,
 }
 
 parse_decl_rhs :: proc(lexer: ^Lexer, name: string, loc: Symbol_Ref, result: ^File_Parse_Result) {
@@ -459,19 +464,26 @@ parse_decl_rhs :: proc(lexer: ^Lexer, name: string, loc: Symbol_Ref, result: ^Fi
             type_str := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
                 return kind == .EOF || kind == .Comma || kind == .Open_Brace
             })
-            if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
+            if type_str != "" {
+                result.own_variables[strings.clone(name)]     = type_str
+                result.own_variable_locs[strings.clone(name)] = loc
+            }
             return
         }
         if after.text == "true" || after.text == "false" {
             lexer_next(lexer)
-            result.own_variables[strings.clone(name)] = "bool"
-            result.own_constants[strings.clone(name)] = strings.clone(after.text)
+            result.own_variables[strings.clone(name)]     = "bool"
+            result.own_variable_locs[strings.clone(name)] = loc
+            result.own_constants[strings.clone(name)]     = strings.clone(after.text)
             return
         }
         type_str := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
             return kind == .EOF || kind == .Comma || kind == .Open_Brace
         })
-        if type_str != "" { result.own_variables[strings.clone(name)] = type_str }
+        if type_str != "" {
+            result.own_variables[strings.clone(name)]     = type_str
+            result.own_variable_locs[strings.clone(name)] = loc
+        }
         return
     }
 
@@ -488,7 +500,8 @@ parse_decl_rhs :: proc(lexer: ^Lexer, name: string, loc: Symbol_Ref, result: ^Fi
     if after.kind == .String_Literal || after.kind == .Other {
         type_str := peek_rhs_type(lexer)
         if type_str != "" {
-            result.own_variables[strings.clone(name)] = type_str
+            result.own_variables[strings.clone(name)]     = type_str
+            result.own_variable_locs[strings.clone(name)] = loc
             raw_val : string
             if after.kind == .String_Literal {
                 raw_val = after.text
@@ -503,22 +516,21 @@ parse_decl_rhs :: proc(lexer: ^Lexer, name: string, loc: Symbol_Ref, result: ^Fi
 }
 
 parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
-    result := File_Parse_Result{
-        file_path      = strings.clone(file_path),
-        own_structs    = make(map[string]Struct_Definition),
-        own_enums      = make(map[string]Enum_Definition),
-        own_unions     = make(map[string]Union_Definition),
-        own_procs      = make(map[string]Proc_Definition),
-        own_variables  = make(map[string]string),
+    result := File_Parse_Result {
+        file_path         = strings.clone(file_path),
+        own_structs       = make(map[string]Struct_Definition),
+        own_enums         = make(map[string]Enum_Definition),
+        own_unions        = make(map[string]Union_Definition),
+        own_procs         = make(map[string]Proc_Definition),
+        own_variables     = make(map[string]string),
         own_variable_locs = make(map[string]Symbol_Ref),
-        own_constants  = make(map[string]string),
-        import_aliases = make(map[string]string),
+        own_constants     = make(map[string]string),
+        import_aliases    = make(map[string]string),
     }
-    lexer           := lexer_make(src)
+    lexer       := lexer_make(src)
     paren_depth := 0
     brace_depth := 0
-
-    loc := Symbol_Ref{file = result.file_path}
+    loc         := Symbol_Ref{file = result.file_path}
 
     for {
         tok := lexer_next(&lexer)
@@ -640,7 +652,6 @@ parse_source_file :: proc(file_path: string, src: string) -> File_Parse_Result {
             }
         }
     }
-
     return result
 }
 
@@ -872,14 +883,16 @@ load_package_symbols :: proc(package_dir: string) {
     context.allocator = virtual.arena_allocator(&g_package_arena)
 
     pkg := Package_Symbols{
-        structs   = make(map[string]Struct_Definition),
-        enums     = make(map[string]Enum_Definition),
-        unions    = make(map[string]Union_Definition),
-        procs     = make(map[string]Proc_Definition),
-        variables = make(map[string]string),
+        structs       = make(map[string]Struct_Definition),
+        enums         = make(map[string]Enum_Definition),
+        unions        = make(map[string]Union_Definition),
+        procs         = make(map[string]Proc_Definition),
+        variables     = make(map[string]string),
+        variable_locs = make(map[string]Symbol_Ref),
     }
 
-    type_aliases := make(map[string]string)
+    type_aliases    := make(map[string]string)
+    type_alias_locs := make(map[string]Symbol_Ref)
 
     file_infos, err := os.read_all_directory_by_path(package_dir, context.allocator)
     if err != nil {
@@ -890,9 +903,8 @@ load_package_symbols :: proc(package_dir: string) {
     defer os.file_info_slice_delete(file_infos, context.allocator)
 
     for fi in file_infos {
-        if fi.type == .Directory                       { continue }
+        if fi.type == .Directory                      { continue }
         if !strings.has_suffix(fi.name, ".odin")      { continue }
-        if  strings.has_suffix(fi.name, "_test.odin") { continue }
 
         full_path := strings.concatenate({package_dir, "/", fi.name}, context.allocator)
         src_data, read_err := os.read_entire_file_from_path(full_path, context.allocator)
@@ -902,11 +914,12 @@ load_package_symbols :: proc(package_dir: string) {
         delete(full_path, context.allocator)
         delete(src_data, context.allocator)
 
-        for k, &s in file_result.own_structs   { pkg.structs[k]  = s }
-        for k, &e in file_result.own_enums     { pkg.enums[k]    = e }
-        for k, &u in file_result.own_unions    { pkg.unions[k]   = u }
-        for k, &p in file_result.own_procs     { pkg.procs[k]    = p }
-        for k,  v in file_result.own_variables { type_aliases[k] = v }
+        for k, &s in file_result.own_structs       { pkg.structs[k]       = s }
+        for k, &e in file_result.own_enums         { pkg.enums[k]         = e }
+        for k, &u in file_result.own_unions        { pkg.unions[k]        = u }
+        for k, &p in file_result.own_procs         { pkg.procs[k]         = p }
+        for k,  v in file_result.own_variables     { type_aliases[k]      = v }
+        for k,  v in file_result.own_variable_locs { type_alias_locs[k]   = v }
     }
 
     follow_alias_chain :: proc(aliases: map[string]string, start: string) -> string {
@@ -921,16 +934,20 @@ load_package_symbols :: proc(package_dir: string) {
         if len(alias_name) == 0 || alias_name[0] < 'A' || alias_name[0] > 'Z' { continue }
         resolved := follow_alias_chain(type_aliases, target)
 
+        cloned_name := strings.clone(alias_name)
+        if loc, has_loc := type_alias_locs[alias_name]; has_loc {
+            pkg.variable_locs[cloned_name] = loc
+        }
         if entry, ok := pkg.structs[resolved]; ok {
             copy := Struct_Definition{fields = make([dynamic]Struct_Field, len(entry.fields))}
             for &f, i in entry.fields { copy.fields[i] = {name = strings.clone(f.name), type = strings.clone(f.type)} }
-            pkg.structs[strings.clone(alias_name)] = copy
+            pkg.structs[cloned_name] = copy
         } else if entry, ok := pkg.enums[resolved]; ok {
             copy := Enum_Definition{values = make([dynamic]string, len(entry.values))}
             for v, i in entry.values { copy.values[i] = strings.clone(v) }
-            pkg.enums[strings.clone(alias_name)] = copy
+            pkg.enums[cloned_name] = copy
         } else {
-            pkg.variables[strings.clone(alias_name)] = strings.clone(resolved)
+            pkg.variables[cloned_name] = strings.clone(resolved)
         }
     }
 
@@ -998,9 +1015,7 @@ resolve_and_load_imports :: proc(idx: ^Project_Index, source_dir: string) {
 }
 
 dir_should_be_skipped :: proc(name: string) -> bool {
-    if len(name) > 0 && name[0] == '.' { return true }
-    for excluded in DIRS_EXCLUEDE_FROM_INDEXING { if name == excluded { return true } }
-    return false
+    return len(name) > 0 && name[0] == '.'
 }
 
 index_one_file :: proc(path: string, src: string) -> File_Parse_Result {
@@ -1033,7 +1048,6 @@ index_one_file :: proc(path: string, src: string) -> File_Parse_Result {
     for name in result.own_procs     { g_symbol_basename[strings.clone(name)] = syms.basename }
     for name in result.own_variables { g_symbol_basename[strings.clone(name)] = syms.basename }
 
-
     return result
 }
 
@@ -1058,7 +1072,7 @@ index_project_tree :: proc(project_root: string) -> (Project_Index, [dynamic]str
                 }
                 continue
             }
-            if !strings.has_suffix(e.name, ".odin") || strings.has_suffix(e.name, "_test.odin") { continue }
+            if !strings.has_suffix(e.name, ".odin") { continue }
             full_path := strings.concatenate({current, "/", e.name}, context.allocator)
             src_data, read_err := os.read_entire_file_from_path(full_path, context.allocator)
             if read_err != nil { delete(full_path, context.allocator); continue }
@@ -1081,14 +1095,14 @@ index_project_tree :: proc(project_root: string) -> (Project_Index, [dynamic]str
 }
 
 merge_file_into_index :: proc(idx: ^Project_Index, file_result: ^File_Parse_Result) {
-    for k, &s in file_result.own_structs    { idx.own_structs[k]        = s }
-    for k, &e in file_result.own_enums      { idx.own_enums[k]          = e }
-    for k, &u in file_result.own_unions     { idx.own_unions[k]         = u }
-    for k,  v in file_result.own_procs      { idx.own_procs[k]          = v }
-    for k,  v in file_result.own_variables  { idx.own_variables[k]      = v }
+    for k, &s in file_result.own_structs       { idx.own_structs[k]       = s }
+    for k, &e in file_result.own_enums         { idx.own_enums[k]         = e }
+    for k, &u in file_result.own_unions        { idx.own_unions[k]        = u }
+    for k,  v in file_result.own_procs         { idx.own_procs[k]         = v }
+    for k,  v in file_result.own_variables     { idx.own_variables[k]     = v }
     for k,  v in file_result.own_variable_locs { idx.own_variable_locs[k] = v }
-    for k,  v in file_result.own_constants  { idx.own_constants[k]      = v }
-    for k,  v in file_result.import_aliases { idx.import_aliases[k]     = v }
+    for k,  v in file_result.own_constants     { idx.own_constants[k]     = v }
+    for k,  v in file_result.import_aliases    { idx.import_aliases[k]    = v }
 }
 
 path_parent_dir :: proc(file_path: string, allocator := context.allocator) -> string {
@@ -1123,10 +1137,10 @@ project_index_destroy :: proc(idx: ^Project_Index) {
     for k, v in idx.imported_package_dirs   { delete(k); delete(v) }
     delete(idx.imported_package_dirs)
 
-    for k, v in idx.imported_struct_sources  { delete(k); delete(v) }
+    for k, v in idx.imported_struct_sources { delete(k); delete(v) }
     delete(idx.imported_struct_sources)
 
-    for k, v in idx.imported_enum_sources    { delete(k); delete(v) }
+    for k, v in idx.imported_enum_sources   { delete(k); delete(v) }
     delete(idx.imported_enum_sources)
 
     for k, &v in idx.imported_struct_conflicts { for s in v { delete(s) }; delete(v); delete(k) }
@@ -1239,8 +1253,8 @@ rebuild_index :: proc(trigger_file: string) {
 }
 
 rebuild_index_from_buf :: proc(path: string, src: string) {
-    raw         := transmute([]u8)src
-    hash        := file_hash(raw)
+    raw  := transmute([]u8)src
+    hash := file_hash(raw)
     cached_hash, was_cached := g_file_hash_cache[path]
     if was_cached && cached_hash == hash { return }
     reindex_from_content(path, was_cached, raw)
@@ -1264,11 +1278,11 @@ package_by_alias :: proc(alias: string) -> ^Package_Symbols {
 resolve_to_known_type :: proc(name: string) -> string {
     if name in g_index.own_structs               { return name }
     if name in g_index.own_enums                 { return name }
-    if name in g_index.imported_struct_conflicts { return "" }
+    if name in g_index.imported_struct_conflicts { return ""   }
     if name in g_index.all_imported_structs      { return name }
-    if name in g_index.imported_enum_conflicts   { return "" }
+    if name in g_index.imported_enum_conflicts   { return ""   }
     if name in g_index.all_imported_enums        { return name }
-    if t, ok := g_index.own_variables[name]; ok  { return t   }
+    if t, ok := g_index.own_variables[name]; ok  { return t    }
     return ""
 }
 
@@ -1295,7 +1309,7 @@ params_from_ctx :: proc(local_ctx: string) -> map[string]string {
 
 parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[string]string {
     vars        := make(map[string]string)
-    lexer           := lexer_make(src)
+    lexer       := lexer_make(src)
     paren_depth := 0
     brace_depth := 0
 
@@ -1399,6 +1413,20 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
                 lexer_next(&lexer)
                 p := parse_proc_signature(&lexer)
                 vars[strings.clone(name)] = fmt.tprintf("proc%s", proc_signature_summary(p))
+            } else if after.kind == .Identifier && after.text == "for" {
+                for_line := after.line
+                sb := strings.builder_make(context.temp_allocator)
+                prev_end := -1
+                for {
+                    peeked := lexer_peek(&lexer)
+                    if peeked.kind == .EOF || peeked.kind == .Open_Brace || peeked.line > for_line { break }
+                    tok := lexer_next(&lexer)
+                    if prev_end != -1 && tok.col > prev_end { strings.write_byte(&sb, ' ') }
+                    strings.write_string(&sb, tok.text)
+                    prev_end = tok.col + len(tok.text)
+                }
+                label_str := strings.trim_right(strings.to_string(sb), " \t")
+                if label_str != "" { vars[strings.clone(name)] = strings.clone(label_str) }
             } else if after.kind == .Identifier && after.text != "struct" && after.text != "enum" && after.text != "union" {
                 type_str := parse_type_until(&lexer, proc(kind: Token_Kind, t: string) -> bool {
                     return kind == .EOF || kind == .Comma || kind == .Open_Brace
@@ -1465,9 +1493,26 @@ parse_local_vars :: proc(src: string, consts: ^map[string]string = nil) -> map[s
                 continue
             }
 
+            if type_tok.kind == .Identifier && type_tok.text == "for" {
+                for_line := type_tok.line
+                sb := strings.builder_make(context.temp_allocator)
+                prev_end := -1
+                for {
+                    peeked := lexer_peek(&lexer)
+                    if peeked.kind == .EOF || peeked.kind == .Open_Brace || peeked.line > for_line { break }
+                    tok := lexer_next(&lexer)
+                    if prev_end != -1 && tok.col > prev_end { strings.write_byte(&sb, ' ') }
+                    strings.write_string(&sb, tok.text)
+                    prev_end = tok.col + len(tok.text)
+                }
+                label_str := strings.trim_right(strings.to_string(sb), " \t")
+                if label_str != "" { vars[strings.clone(name)] = strings.clone(label_str) }
+                continue
+            }
+
             type_parts := make([dynamic]string, context.temp_allocator)
             start_line := type_tok.line
-            depth := 0
+            depth      := 0
             for {
                 peeked := lexer_peek(&lexer)
                 if peeked.kind == .EOF || peeked.line > start_line { break }
@@ -1617,9 +1662,9 @@ params_from_sig :: proc(sig: string) -> map[string]string {
 
 proc_name_from_ctx :: proc(local_ctx: string) -> string {
     first_line := local_ctx
-    if nl := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
-    lexer := lexer_make(first_line)
-    tok := lexer_next(&lexer)
+    if nl      := strings.index_byte(local_ctx, '\n'); nl >= 0 { first_line = local_ctx[:nl] }
+    lexer      := lexer_make(first_line)
+    tok        := lexer_next(&lexer)
     if tok.kind == .Identifier { return tok.text }
     return ""
 }
@@ -1679,16 +1724,17 @@ proc_signature_summary :: proc(defn: Proc_Definition) -> string {
 
 hover_for_type :: proc(type_name: string) -> string {
     lookup := strings.trim_prefix(type_name, "^")
-    if d, found := g_index.own_structs[lookup];          found { return format_struct(type_name, d) }
-    if d, found := g_index.own_enums[lookup];            found { return format_enum(type_name, d)   }
-    if d, found := g_index.own_unions[lookup];           found { return format_union(type_name, d)  }
-    if d, found := g_index.all_imported_structs[lookup]; found { return format_struct(type_name, d) }
-    if d, found := g_index.all_imported_enums[lookup];   found { return format_enum(type_name, d)   }
+    if d, found := g_index.own_structs[lookup];          found { return format_struct ( type_name, d) }
+    if d, found := g_index.own_enums[lookup];            found { return format_enum   ( type_name, d) }
+    if d, found := g_index.own_unions[lookup];           found { return format_union  ( type_name, d) }
+    if d, found := g_index.all_imported_structs[lookup]; found { return format_struct ( type_name, d) }
+    if d, found := g_index.all_imported_enums[lookup];   found { return format_enum   ( type_name, d) }
     if alias, name, has_dot := split_at_dot(lookup); has_dot {
         if pkg := package_by_alias(alias); pkg != nil {
-            if d, found := pkg.structs[name];   found { return format_struct(type_name, d)          }
-            if d, found := pkg.enums[name];     found { return format_enum(type_name, d)            }
-            if d, found := pkg.unions[name];    found { return format_union(type_name, d)           }
+            if d, found := pkg.structs[name];   found { return format_struct(type_name, d)        }
+            if d, found := pkg.enums[name];     found { return format_enum(type_name, d)          }
+            if d, found := pkg.unions[name];    found { return format_union(type_name, d)         }
+            if d, found := pkg.procs[name];     found { return format_proc(type_name, d)          }
             if t, found := pkg.variables[name]; found { return fmt.tprintf("%s %s", type_name, t) }
         }
     }
@@ -1730,31 +1776,31 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
     if d, ok := g_index.own_unions[symbol];  ok { return format_union(symbol, d)  }
     if d, ok := g_index.own_procs[symbol];   ok { return format_proc(symbol, d)   }
 
-    if symbol in g_index.imported_struct_conflicts || symbol in g_index.imported_enum_conflicts {
-        if qualified := qualifier_from_ctx(local_ctx, symbol); qualified != "" {
-            if s := hover_for_type(qualified); s != "" { return s }
+    local_consts := make(map[string]string)
+    defer delete(local_consts)
+    vars := parse_local_vars(local_ctx, &local_consts)
+    defer delete(vars)
+    params := params_from_ctx(local_ctx)
+    defer delete(params)
+
+    if symbol not_in vars && symbol not_in params {
+        if symbol in g_index.imported_struct_conflicts || symbol in g_index.imported_enum_conflicts {
+            if qualified := qualifier_from_ctx(local_ctx, symbol); qualified != "" {
+                if s := hover_for_type(qualified); s != "" { return s }
+            }
+            conflicts := g_index.imported_struct_conflicts[symbol]
+            if len(conflicts) == 0 { conflicts = g_index.imported_enum_conflicts[symbol] }
+            return fmt.tprintf("%s: ambiguous (defined in %s)", symbol, strings.join(conflicts[:], ", "))
         }
-        conflicts := g_index.imported_struct_conflicts[symbol]
-        if len(conflicts) == 0 { conflicts = g_index.imported_enum_conflicts[symbol] }
-        return fmt.tprintf("%s: ambiguous (defined in %s)", symbol, strings.join(conflicts[:], ", "))
+        if d, ok := g_index.all_imported_structs[symbol]; ok { return format_struct(symbol, d) }
+        if d, ok := g_index.all_imported_enums[symbol];   ok { return format_enum(symbol, d)   }
     }
-    if d, ok := g_index.all_imported_structs[symbol]; ok { return format_struct(symbol, d) }
-    if d, ok := g_index.all_imported_enums[symbol];   ok { return format_enum(symbol, d)   }
 
     if qualified := qualifier_from_ctx(local_ctx, symbol); qualified != "" {
         if s := hover_for_type(qualified); s != "" { return s }
     }
 
     if v, ok := g_index.own_constants[symbol]; ok { return v }
-
-    type_name    := ""
-    local_consts := make(map[string]string)
-    defer delete(local_consts)
-    vars := parse_local_vars(local_ctx, &local_consts)
-    defer delete(vars)
-
-    params := params_from_ctx(local_ctx)
-    defer delete(params)
 
     resolve_type :: proc(t: string, vars: map[string]string, params: map[string]string) -> string {
         current := t
@@ -1766,6 +1812,7 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
         return current
     }
 
+    type_name := ""
     if v, ok := local_consts[symbol]; ok { return v }
     if t, ok := vars[symbol]; ok {
         resolved := resolve_type(t, vars, params)
@@ -1804,7 +1851,7 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
     return ""
 }
 
-goto_def :: proc(symbol: string, local_ctx: string) -> (file: string, line: int, col: int, ok: bool) {
+goto_def :: proc(symbol: string, local_ctx: string, current_file: string) -> (file: string, line: int, col: int, ok: bool) {
     if d, found := g_index.own_structs[symbol]; found { loc := d.location; return loc.file, loc.line, loc.col, true }
     if d, found := g_index.own_enums[symbol];   found { loc := d.location; return loc.file, loc.line, loc.col, true }
     if d, found := g_index.own_unions[symbol];  found { loc := d.location; return loc.file, loc.line, loc.col, true }
@@ -1812,8 +1859,35 @@ goto_def :: proc(symbol: string, local_ctx: string) -> (file: string, line: int,
     if loc, found := g_index.own_variable_locs[symbol]; found { return loc.file, loc.line, loc.col, true }
     if symbol in g_index.imported_struct_conflicts { return "", 0, 0, false }
     if symbol in g_index.imported_enum_conflicts   { return "", 0, 0, false }
-    if d, found := g_index.all_imported_structs[symbol]; found { loc := d.location; return loc.file, loc.line, loc.col, true }
-    if d, found := g_index.all_imported_enums[symbol];   found { loc := d.location; return loc.file, loc.line, loc.col, true }
+    vars := parse_local_vars(local_ctx)
+    defer delete(vars)
+    params := params_from_ctx(local_ctx)
+    defer delete(params)
+    if symbol not_in vars && symbol not_in params {
+        if d, found := g_index.all_imported_structs[symbol]; found { loc := d.location; return loc.file, loc.line, loc.col, true }
+        if d, found := g_index.all_imported_enums[symbol];   found { loc := d.location; return loc.file, loc.line, loc.col, true }
+    }
+    pkg_lookup :: proc(pkg: ^Package_Symbols, name: string) -> (file: string, line: int, col: int, ok: bool) {
+        if d, found := pkg.procs[name];           found { loc := d.location; return loc.file, loc.line, loc.col, true }
+        if d, found := pkg.structs[name];         found { loc := d.location; return loc.file, loc.line, loc.col, true }
+        if d, found := pkg.enums[name];           found { loc := d.location; return loc.file, loc.line, loc.col, true }
+        if d, found := pkg.unions[name];          found { loc := d.location; return loc.file, loc.line, loc.col, true }
+        if loc, found := pkg.variable_locs[name]; found { return loc.file, loc.line, loc.col, true }
+        return "", 0, 0, false
+    }
+    if qualified := qualifier_from_ctx(local_ctx, symbol); qualified != "" {
+        alias, name, _ := split_at_dot(qualified)
+        if pkg := package_by_alias(alias); pkg != nil {
+            if f, l, c, found := pkg_lookup(pkg, name); found { return f, l, c, true }
+        }
+    }
+    current_dir := path_parent_dir(current_file, context.temp_allocator)
+    for pkg_dir, &pkg in g_package_cache {
+        if pkg_dir == current_dir {
+            if f, l, c, found := pkg_lookup(&pkg, symbol); found { return f, l, c, true }
+            break
+        }
+    }
     return "", 0, 0, false
 }
 
@@ -1833,6 +1907,12 @@ completions_from_package :: proc(alias: string, prefix: string) -> string {
     }
     for name, defn in pkg.procs {
         if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, proc_signature_summary(defn)); strings.write_byte(&sb, '\n') }
+    }
+    for name, defn in pkg.unions {
+        if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, strings.join(defn.variants[:], " ")); strings.write_byte(&sb, '\n') }
+    }
+    for name, type_str in pkg.variables {
+        if strings.has_prefix(name, prefix) { strings.write_string(&sb, name); strings.write_byte(&sb, '\t'); strings.write_string(&sb, type_str); strings.write_byte(&sb, '\n') }
     }
     return strings.trim_right(strings.to_string(sb), "\n")
 }
@@ -1873,19 +1953,19 @@ completions_unqualified :: proc(prefix: string, current_file: string, local_ctx:
         strings.write_byte(b, '\n')
     }
 
+    local_vars := parse_local_vars(local_ctx)
+    defer delete(local_vars)
+    params := params_from_ctx(local_ctx)
+    defer delete(params)
     proc_name := proc_name_from_ctx(local_ctx)
     if proc_name != "" {
-        local_vars := parse_local_vars(local_ctx)
-        defer delete(local_vars)
         for name, type_str in local_vars {
             if !strings.has_prefix(name, prefix) { continue }
-            strings.write_string(&own, name); strings.write_byte(&own, '\t')
-            strings.write_string(&own, proc_name); strings.write_string(&own, " · ")
-            strings.write_string(&own, type_str); strings.write_byte(&own, '\n')
+            strings.write_string(&own, name)      ; strings.write_byte(&own, '\t')
+            strings.write_string(&own, proc_name) ; strings.write_string(&own, " · ")
+            strings.write_string(&own, type_str)  ; strings.write_byte(&own, '\n')
         }
 
-        params := params_from_ctx(local_ctx)
-        defer delete(params)
         for name, type_str in params {
             if !strings.has_prefix(name, prefix) || name in local_vars { continue }
             strings.write_string(&own, name); strings.write_byte(&own, '\t')
@@ -2218,11 +2298,12 @@ handle_client :: proc(client_fd: posix.FD) {
             write_frame(client_fd, result)
 
         case "goto":
-            sym,       sym_ok := read_frame(client_fd, context.temp_allocator); if !sym_ok { return }
-            local_ctx, ctx_ok := read_frame(client_fd, context.temp_allocator); if !ctx_ok { return }
+            sym,          sym_ok  := read_frame(client_fd, context.temp_allocator); if !sym_ok  { return }
+            local_ctx,    ctx_ok  := read_frame(client_fd, context.temp_allocator); if !ctx_ok  { return }
+            current_file, file_ok := read_frame(client_fd, context.temp_allocator); if !file_ok { return }
 
             context.allocator = context.temp_allocator
-            file, line, col, found := goto_def(sym, local_ctx)
+            file, line, col, found := goto_def(sym, local_ctx, current_file)
             if found {
                 write_frame(client_fd, fmt.tprintf("%s\x00%d\x00%d", file, line, col))
             } else {
@@ -2241,6 +2322,11 @@ handle_client :: proc(client_fd: posix.FD) {
             context.allocator = g_persistent_allocator
             rebuild_index_from_buf(path, src)
             write_frame(client_fd, "")
+
+        case "owns":
+            path, path_ok := read_frame(client_fd, context.temp_allocator); if !path_ok { return }
+            dir := path_parent_dir(path, context.temp_allocator)
+            write_frame(client_fd, "1" if dir in g_package_cache else "")
 
         case:
             fmt.eprintfln("unknown cmd: %q", cmd)

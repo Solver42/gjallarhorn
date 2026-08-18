@@ -6,13 +6,11 @@ It stays out of your way until you need it.
 ![some name](img/hover.png)
 ![some name](img/autocomplete.png)
 
-If you want an IDE experience with refactoring, diagnostics, code actions, and LSP support across many editors, [OLS](https://github.com/DanielGavin/ols) is the right choice.
-
-Why use Gjallarhorn then?
+Why use Gjallarhorn?
 
 - **Speed** — A custom lexer made in odin over a binary Unix socket. Purpose-built for completion and definitions with no AST or JSON overhead. Vim9 script that compiles into bytecode.
 - **Focus** — No diagnostics, no squiggly underlines, no editor trying to fix your code while you're still writing it. The compiler is the source of truth.
-- **Simplicity** — Clone, run the install script, open Vim. No dependencies, no package manager.
+- **Simplicity** — Clone the repo, run the install script. No dependencies, no package manager.
 
 ## Requirements
 

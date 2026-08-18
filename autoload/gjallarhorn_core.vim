@@ -101,6 +101,39 @@ def WarnIfDaemonNotStarted(root: string, _timer_id: number)
     endif
 enddef
 
+def ChannelForRoot(root: string): any
+    if !daemons->has_key(root)
+        return v:null
+    endif
+    if daemons[root]->has_key('job') && job_status(daemons[root].job) !=# 'run'
+        return v:null
+    endif
+    if !daemons[root]->has_key('channel') || ch_status(daemons[root].channel) !=# 'open'
+        if daemons[root]->has_key('socket_path')
+            var open_ch = ch_open('unix:' .. daemons[root].socket_path,
+                {mode: 'raw', timeout: g:gjallarhorn_request_timeout})
+            if ch_status(open_ch) ==# 'open'
+                daemons[root].channel = open_ch
+            endif
+        endif
+    endif
+    if !daemons[root]->has_key('channel') || ch_status(daemons[root].channel) !=# 'open'
+        return v:null
+    endif
+    return daemons[root].channel
+enddef
+
+def RequestOnRoot(root: string, frames: list<string>): string
+    var ch = ChannelForRoot(root)
+    if ch ==# v:null
+        return ''
+    endif
+    for frame in frames
+        ch_sendraw(ch, EncodeFrame(frame))
+    endfor
+    return ReadFrame(ch)
+enddef
+
 export def EnsureDaemon(filepath: string)
     if !executable(g:gjallarhorn_bin)
         echom 'gjallarhorn: binary not found at ' .. g:gjallarhorn_bin
@@ -115,6 +148,17 @@ export def EnsureDaemon(filepath: string)
         endif
         remove(daemons, root)
     endif
+
+    for existing_root in daemons->keys()
+        if !daemons[existing_root]->has_key('job') || job_status(daemons[existing_root].job) !=# 'run'
+            continue
+        endif
+        var resp = RequestOnRoot(existing_root, ['owns', filepath])
+        if resp !=# ''
+            daemons[root] = daemons[existing_root]
+            return
+        endif
+    endfor
 
     daemons[root] = {}
     var job = job_start(
@@ -267,7 +311,7 @@ export def GotoDefinition()
     var fp = expand('%:p')
     Request(fp, ['index_buf', fp, getline(1, '$')->join("\n")])
     var [_start, ctx] = LocalCtx()
-    var resp = Request(fp, ['goto', word, ctx])
+    var resp = Request(fp, ['goto', word, ctx, fp])
     if resp ==# ''
         silent! normal! gd
         return
