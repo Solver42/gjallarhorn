@@ -1,3 +1,9 @@
+## 36
+
+### Fixed
+
+- Resolve field access
+
 ## 35
 
 ### Added

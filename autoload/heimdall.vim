@@ -329,9 +329,9 @@ enddef
 
 export def SetupOdinBuffer()
     EnsureDaemon(expand('<afile>:p'))
-    setlocal omnifunc=gjallarhorn_core#Completion
+    setlocal omnifunc=heimdall#Completion
     IndexAsync(expand('<afile>:p'))
-    nnoremap <buffer> <silent> K  <cmd>call gjallarhorn_core#ToggleHover()<CR>
-    nnoremap <buffer> <silent> gd <cmd>call gjallarhorn_core#GotoDefinition()<CR>
+    nnoremap <buffer> <silent> K  <cmd>call heimdall#ToggleHover()<CR>
+    nnoremap <buffer> <silent> gd <cmd>call heimdall#GotoDefinition()<CR>
 enddef
 

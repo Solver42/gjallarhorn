@@ -298,18 +298,17 @@ skip_to_next_statement :: proc(lexer: ^Lexer) {
     }
 }
 
-skip_rhs_value :: proc(lexer: ^Lexer) {
-    start_line  := lexer.line
+skip_rhs_value :: proc(lexer: ^Lexer, stop_line: int) {
     paren_depth := 0
     brace_depth := 0
     for {
         peeked := lexer_peek(lexer)
-        if peeked.kind == .EOF || peeked.line > start_line { return }
-        if peeked.kind == .Open_Brace                              { brace_depth += 1 }
-        if peeked.kind == .Close_Brace && brace_depth > 0         { brace_depth -= 1 }
-        if peeked.kind == .Other && peeked.text == "("                { paren_depth += 1 }
+        if peeked.kind == .EOF || peeked.line > stop_line { return }
+        if peeked.kind == .Open_Brace                                     { brace_depth += 1 }
+        if peeked.kind == .Close_Brace && brace_depth > 0                 { brace_depth -= 1 }
+        if peeked.kind == .Other && peeked.text == "("                    { paren_depth += 1 }
         if peeked.kind == .Other && peeked.text == ")" && paren_depth > 0 { paren_depth -= 1 }
-        if peeked.kind == .Comma && paren_depth == 0 && brace_depth == 0 { return }
+        if peeked.kind == .Comma && paren_depth == 0 && brace_depth == 0  { return }
         lexer_next(lexer)
     }
 }
@@ -376,7 +375,7 @@ infer_numeric_type :: proc(lexer: ^Lexer) -> string {
 
 peek_rhs_type :: proc(lexer: ^Lexer) -> string {
     tok := lexer_peek(lexer)
-    if tok.kind == .String_Literal { skip_rhs_value(lexer); return "string" }
+    if tok.kind == .String_Literal { skip_rhs_value(lexer, tok.line); return "string" }
     if tok.kind == .Other && len(tok.text) > 0 {
         if tok.text[0] >= '0' && tok.text[0] <= '9' {
             return infer_numeric_type(lexer)
@@ -390,12 +389,12 @@ peek_rhs_type :: proc(lexer: ^Lexer) -> string {
                 return infer_numeric_type(lexer)
             }
         }
-        if tok.text[0] == '\'' { skip_rhs_value(lexer); return "rune" }
+        if tok.text[0] == '\'' { skip_rhs_value(lexer, tok.line); return "rune" }
     }
     if tok.kind == .Identifier {
         switch tok.text {
-        case "true", "false": skip_rhs_value(lexer); return "bool"
-        case "nil":           skip_rhs_value(lexer); return ""
+        case "true", "false": skip_rhs_value(lexer, tok.line); return "bool"
+        case "nil":           skip_rhs_value(lexer, tok.line); return ""
         case "make", "new":
             lexer_next(lexer)
             if lexer_peek(lexer).kind == .Other && lexer_peek(lexer).text == "(" {
@@ -403,18 +402,18 @@ peek_rhs_type :: proc(lexer: ^Lexer) -> string {
                 type_str := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
                     return kind == .EOF || kind == .Comma || (kind == .Other && t == ")")
                 })
-                skip_rhs_value(lexer)
+                skip_rhs_value(lexer, tok.line)
                 return type_str
             }
-            skip_rhs_value(lexer)
+            skip_rhs_value(lexer, tok.line)
             return ""
         }
     }
     type_str := parse_type_until(lexer, proc(kind: Token_Kind, t: string) -> bool {
-        return kind == .EOF || kind == .Open_Brace || kind == .Colon ||
+        return kind == .EOF || kind == .Open_Brace || kind == .Colon || kind == .Comma ||
                (kind == .Other && (t == "=" || t == "("))
     }, tok.line)
-    skip_rhs_value(lexer)
+    skip_rhs_value(lexer, tok.line)
     return type_str
 }
 
@@ -1596,7 +1595,7 @@ resolve_local_var_type :: proc(local_ctx: string, var_name: string) -> (string, 
     }
 
     if t, ok := vars[var_name]; ok {
-        resolved := resolve(t, vars, params)
+        resolved := resolve_field_access(resolve(t, vars, params), vars, params)
         if defn, is_proc := g_index.own_procs[resolved]; is_proc && len(defn.returns) > 0 {
             return strings.clone(defn.returns[0]), true
         }
@@ -1606,6 +1605,26 @@ resolve_local_var_type :: proc(local_ctx: string, var_name: string) -> (string, 
     if t, ok := params[var_name]; ok { return t, true }
 
     return "", false
+}
+
+resolve_field_access :: proc(expr: string, vars: map[string]string, params: map[string]string) -> string {
+    dot := strings.index_byte(expr, '.')
+    if dot < 0 { return expr }
+    receiver_name := expr[:dot]
+    field_name    := expr[dot+1:]
+
+    raw_type := params[receiver_name]
+    if raw_type == "" { raw_type = vars[receiver_name] }
+    if raw_type == "" { return expr }
+
+    struct_name := strings.trim_prefix(raw_type, "^")
+    defn, ok := g_index.own_structs[struct_name]
+    if !ok { return expr }
+
+    for f in defn.fields {
+        if f.name == field_name { return f.type }
+    }
+    return expr
 }
 
 params_from_sig :: proc(sig: string) -> map[string]string {
@@ -1815,7 +1834,7 @@ hover_info :: proc(symbol: string, local_ctx: string) -> string {
     type_name := ""
     if v, ok := local_consts[symbol]; ok { return v }
     if t, ok := vars[symbol]; ok {
-        resolved := resolve_type(t, vars, params)
+        resolved := resolve_field_access(resolve_type(t, vars, params), vars, params)
         if defn, is_proc := g_index.own_procs[resolved]; is_proc && len(defn.returns) > 0 {
             type_name = defn.returns[0]
         } else {

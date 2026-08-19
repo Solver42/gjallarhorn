@@ -8,7 +8,7 @@ It stays out of your way until you need it.
 
 Why use Gjallarhorn?
 
-- **Speed** — A custom lexer made in odin over a binary Unix socket. Purpose-built for completion and definitions with no AST or JSON overhead. Vim9 script that compiles into bytecode.
+- **Speed** — A custom lexer made in odin over a binary Unix socket. Purpose-built for completion and definitions with no JSON overhead. Vim9 script that compiles into bytecode.
 - **Focus** — No diagnostics, no squiggly underlines, no editor trying to fix your code while you're still writing it. The compiler is the source of truth.
 - **Simplicity** — Clone the repo, run the install script. No dependencies, no package manager.
 
