@@ -1,3 +1,16 @@
+## 37
+
+### Added
+
+- Autocomplete and hover on fields after a procedure call
+
+### Fixed
+
+- Autocomplete skip other blocks
+- Hover shows correct declaration on duplicate names
+- Autocomplete in package scope don't show variables from the procedure above
+- Go to definition jumps to correct procedure
+
 ## 36
 
 ### Fixed

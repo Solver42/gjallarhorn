@@ -1,267 +1,319 @@
 vim9script
 
-var daemons: dict<any>     = {}
-var hover_popup_id: number = -1
-var buffers: dict<string>  = {}
+var g_daemon_handle_by_project_root: dict<any>    = {}
+var hover_popup_id:                  number       = -1
+var g_channel_read_buffers_by_channel_key: dict<string> = {}
+var g_top_level_proc_ranges_by_buffer: dict<any> = {}
 
 def FindProjectRoot(dir: string): string
-    var cur = dir
+    var current_dir = dir
     while true
-        for m in g:gjallarhorn_root_markers
-            if filereadable(cur .. '/' .. m) || isdirectory(cur .. '/' .. m)
-                return cur
+        for marker in g:gjallarhorn_root_markers
+            if filereadable(current_dir .. '/' .. marker) || isdirectory(current_dir .. '/' .. marker)
+                return current_dir
             endif
         endfor
-        var parent = fnamemodify(cur, ':h')
-        if parent ==# cur
+        var parent_dir = fnamemodify(current_dir, ':h')
+        if parent_dir ==# current_dir
             return dir
         endif
-        cur = parent
+        current_dir = parent_dir
     endwhile
     return dir
 enddef
 
-def EncodeFrame(msg: string): string
-    return printf('%08x', len(msg)) .. msg
+def EncodeLengthPrefixedFrame(message: string): string
+    return printf('%08x', len(message)) .. message
 enddef
 
-def ChannelReadN(ch: channel, n: number): string
-    var key = string(ch)
-    if !buffers->has_key(key)
-        buffers[key] = ''
+def ReadExactlyNBytes(channel: channel, byte_count: number): string
+    var channel_key = string(channel)
+    if !g_channel_read_buffers_by_channel_key->has_key(channel_key)
+        g_channel_read_buffers_by_channel_key[channel_key] = ''
     endif
-    while len(buffers[key]) < n
-        var chunk = ch_read(ch, {timeout: g:gjallarhorn_request_timeout})
+    while len(g_channel_read_buffers_by_channel_key[channel_key]) < byte_count
+        var chunk = ch_read(channel, {timeout: g:gjallarhorn_request_timeout})
         if type(chunk) != v:t_string || chunk ==# ''
             break
         endif
-        buffers[key] ..= chunk
+        g_channel_read_buffers_by_channel_key[channel_key] ..= chunk
     endwhile
-    if len(buffers[key]) < n
+    if len(g_channel_read_buffers_by_channel_key[channel_key]) < byte_count
         return ''
     endif
-    var result = strpart(buffers[key], 0, n)
-    buffers[key] = strpart(buffers[key], n)
+    var result = strpart(g_channel_read_buffers_by_channel_key[channel_key], 0, byte_count)
+    g_channel_read_buffers_by_channel_key[channel_key] = strpart(g_channel_read_buffers_by_channel_key[channel_key], byte_count)
     return result
 enddef
 
-def ReadFrame(ch: channel): string
-    var hdr = ChannelReadN(ch, 8)
-    if len(hdr) != 8
+def ReadLengthPrefixedFrame(channel: channel): string
+    var length_header = ReadExactlyNBytes(channel, 8)
+    if len(length_header) != 8
         return ''
     endif
-    var n = str2nr(hdr, 16)
-    if n == 0
+    var frame_length = str2nr(length_header, 16)
+    if frame_length == 0
         return ''
     endif
-    return ChannelReadN(ch, n)
+    return ReadExactlyNBytes(channel, frame_length)
 enddef
 
-def OnDaemonStderr(root: string, ch: channel, msg: string)
-    if !daemons->has_key(root)
+def OnDaemonStderrLine(project_root: string, channel: channel, message: string)
+    if !g_daemon_handle_by_project_root->has_key(project_root)
         return
     endif
-    if msg =~# '^socket:'
-        var path = substitute(matchstr(msg, '^socket:\zs.*'), '[\r\n\t ]\+$', '', '')
-        daemons[root].socket_path = path
-        var open_ch = ch_open('unix:' .. path, {mode: 'raw', timeout: g:gjallarhorn_request_timeout})
-        daemons[root].channel = open_ch
+    if message =~# '^socket:'
+        var socket_path = substitute(matchstr(message, '^socket:\zs.*'), '[\r\n\t ]\+$', '', '')
+        g_daemon_handle_by_project_root[project_root].socket_path = socket_path
+        var initial_channel = ch_open('unix:' .. socket_path, {mode: 'raw', timeout: g:gjallarhorn_request_timeout})
+        g_daemon_handle_by_project_root[project_root].channel = initial_channel
     endif
 enddef
 
-def DaemonChannel(filepath: string): any
-    var root = FindProjectRoot(fnamemodify(filepath, ':h'))
-    if !daemons->has_key(root)
-        return v:null
-    endif
-
-    if daemons[root]->has_key('job') && job_status(daemons[root].job) !=# 'run'
-        return v:null
-    endif
-
-    if !daemons[root]->has_key('channel') || ch_status(daemons[root].channel) !=# 'open'
-        if daemons[root]->has_key('socket_path')
-            var open_ch = ch_open('unix:' .. daemons[root].socket_path,
-                {mode: 'raw', timeout: g:gjallarhorn_request_timeout})
-            if ch_status(open_ch) ==# 'open'
-                daemons[root].channel = open_ch
-            endif
-        endif
-    endif
-
-    if !daemons[root]->has_key('channel') || ch_status(daemons[root].channel) !=# 'open'
-        return v:null
-    endif
-    return daemons[root].channel
-enddef
-
-def WarnIfDaemonNotStarted(root: string, _timer_id: number)
-    if daemons->has_key(root) && !daemons[root]->has_key('channel')
+def WarnIfDaemonChannelNotOpen(project_root: string, _timer_id: number)
+    if g_daemon_handle_by_project_root->has_key(project_root) && !g_daemon_handle_by_project_root[project_root]->has_key('channel')
         echom 'gjallarhorn: daemon channel did not open'
     endif
 enddef
 
-def ChannelForRoot(root: string): any
-    if !daemons->has_key(root)
+def ChannelForProjectRoot(project_root: string): any
+    if !g_daemon_handle_by_project_root->has_key(project_root)
         return v:null
     endif
-    if daemons[root]->has_key('job') && job_status(daemons[root].job) !=# 'run'
+    if g_daemon_handle_by_project_root[project_root]->has_key('job') && job_status(g_daemon_handle_by_project_root[project_root].job) !=# 'run'
         return v:null
     endif
-    if !daemons[root]->has_key('channel') || ch_status(daemons[root].channel) !=# 'open'
-        if daemons[root]->has_key('socket_path')
-            var open_ch = ch_open('unix:' .. daemons[root].socket_path,
+    if !g_daemon_handle_by_project_root[project_root]->has_key('channel') || ch_status(g_daemon_handle_by_project_root[project_root].channel) !=# 'open'
+        if g_daemon_handle_by_project_root[project_root]->has_key('socket_path')
+            var reconnected_channel = ch_open('unix:' .. g_daemon_handle_by_project_root[project_root].socket_path,
                 {mode: 'raw', timeout: g:gjallarhorn_request_timeout})
-            if ch_status(open_ch) ==# 'open'
-                daemons[root].channel = open_ch
+            if ch_status(reconnected_channel) ==# 'open'
+                g_daemon_handle_by_project_root[project_root].channel = reconnected_channel
             endif
         endif
     endif
-    if !daemons[root]->has_key('channel') || ch_status(daemons[root].channel) !=# 'open'
+    if !g_daemon_handle_by_project_root[project_root]->has_key('channel') || ch_status(g_daemon_handle_by_project_root[project_root].channel) !=# 'open'
         return v:null
     endif
-    return daemons[root].channel
+    return g_daemon_handle_by_project_root[project_root].channel
 enddef
 
-def RequestOnRoot(root: string, frames: list<string>): string
-    var ch = ChannelForRoot(root)
-    if ch ==# v:null
+def SendRequestForProjectRoot(project_root: string, frames: list<string>, wait_for_response: bool = true): string
+    var daemon_channel = ChannelForProjectRoot(project_root)
+    if daemon_channel ==# v:null
         return ''
     endif
     for frame in frames
-        ch_sendraw(ch, EncodeFrame(frame))
+        ch_sendraw(daemon_channel, EncodeLengthPrefixedFrame(frame))
     endfor
-    return ReadFrame(ch)
+    if !wait_for_response
+        ch_read(daemon_channel, {timeout: 0})
+        return ''
+    endif
+    return ReadLengthPrefixedFrame(daemon_channel)
 enddef
 
-export def EnsureDaemon(filepath: string)
+def SendRequest(file_path: string, frames: list<string>, wait_for_response: bool = true): string
+    return SendRequestForProjectRoot(FindProjectRoot(fnamemodify(file_path, ':h')), frames, wait_for_response)
+enddef
+
+export def EnsureDaemon(file_path: string)
     if !executable(g:gjallarhorn_bin)
         echom 'gjallarhorn: binary not found at ' .. g:gjallarhorn_bin
         return
     endif
 
-    var root = FindProjectRoot(fnamemodify(filepath, ':h'))
+    var project_root = FindProjectRoot(fnamemodify(file_path, ':h'))
 
-    if daemons->has_key(root)
-        if !daemons[root]->has_key('job') || job_status(daemons[root].job) ==# 'run'
+    if g_daemon_handle_by_project_root->has_key(project_root)
+        if !g_daemon_handle_by_project_root[project_root]->has_key('job') || job_status(g_daemon_handle_by_project_root[project_root].job) ==# 'run'
             return
         endif
-        remove(daemons, root)
+        remove(g_daemon_handle_by_project_root, project_root)
     endif
 
-    for existing_root in daemons->keys()
-        if !daemons[existing_root]->has_key('job') || job_status(daemons[existing_root].job) !=# 'run'
+    for existing_root in g_daemon_handle_by_project_root->keys()
+        if !g_daemon_handle_by_project_root[existing_root]->has_key('job') || job_status(g_daemon_handle_by_project_root[existing_root].job) !=# 'run'
             continue
         endif
-        var resp = RequestOnRoot(existing_root, ['owns', filepath])
-        if resp !=# ''
-            daemons[root] = daemons[existing_root]
+        var indexes_directory_response = SendRequestForProjectRoot(existing_root, ['indexes_directory', file_path])
+        if indexes_directory_response !=# ''
+            g_daemon_handle_by_project_root[project_root] = g_daemon_handle_by_project_root[existing_root]
             return
         endif
     endfor
 
-    daemons[root] = {}
-    var job = job_start(
-        [g:gjallarhorn_bin, '--daemon', filepath] + g:gjallarhorn_root_markers,
-        {err_cb: (ch, msg) => OnDaemonStderr(root, ch, msg), stoponexit: 'term'})
+    g_daemon_handle_by_project_root[project_root] = {}
+    var daemon_job = job_start(
+        [g:gjallarhorn_bin, '--daemon', file_path] + g:gjallarhorn_root_markers,
+        {err_cb: (ch, msg) => OnDaemonStderrLine(project_root, ch, msg), stoponexit: 'term'})
 
-    if job_status(job) ==# 'fail'
-        remove(daemons, root)
+    if job_status(daemon_job) ==# 'fail'
+        remove(g_daemon_handle_by_project_root, project_root)
         echom 'gjallarhorn: failed to start daemon'
         return
     endif
 
-    daemons[root].job = job
-    timer_start(g:gjallarhorn_startup_timeout, (t) => WarnIfDaemonNotStarted(root, t))
+    g_daemon_handle_by_project_root[project_root].job = daemon_job
+    timer_start(g:gjallarhorn_startup_timeout, (timer_id) => WarnIfDaemonChannelNotOpen(project_root, timer_id))
 enddef
 
-def Request(filepath: string, frames: list<string>): string
-    var ch = DaemonChannel(filepath)
-    if ch ==# v:null
+def SkipBackwardOverBracketGroup(line_text: string, end_index: number): number
+    if end_index <= 0
+        return end_index
+    endif
+    var close_character = line_text[end_index - 1]
+    if close_character !=# ')' && close_character !=# ']'
+        return end_index
+    endif
+    var open_character = close_character ==# ')' ? '(' : '['
+    var depth  = 1
+    var cursor = end_index - 1
+    while cursor > 0
+        cursor -= 1
+        if line_text[cursor] ==# close_character
+            depth += 1
+        elseif line_text[cursor] ==# open_character
+            depth -= 1
+            if depth == 0
+                return cursor
+            endif
+        endif
+    endwhile
+    return end_index
+enddef
+
+def SkipBackwardOverChainSegment(line_text: string, end_index: number): number
+    var cursor = SkipBackwardOverBracketGroup(line_text, end_index)
+    while cursor > 0 && line_text[cursor - 1] =~# '\w'
+        cursor -= 1
+    endwhile
+    return cursor
+enddef
+
+def ExtractDotChainBeforeIndex(line_text: string, start_index: number): string
+    if start_index <= 0 || line_text[start_index - 1] !=# '.'
         return ''
     endif
-    for frame in frames
-        ch_sendraw(ch, EncodeFrame(frame))
-    endfor
-    return ReadFrame(ch)
-enddef
-
-def SendAsync(filepath: string, frames: list<string>)
-    var ch = DaemonChannel(filepath)
-    if ch ==# v:null
-        return
+    var last_dot_index = start_index - 1
+    var column_index   = SkipBackwardOverChainSegment(line_text, last_dot_index)
+    if column_index == last_dot_index
+        return ''
     endif
-    for frame in frames
-        ch_sendraw(ch, EncodeFrame(frame))
-    endfor
-    ch_read(ch, {timeout: 0})
-enddef
-
-def CompContext(): list<string>
-    var col_idx = col('.') - 1
-    var text    = getline('.')
-    var prefix  = matchstr(text[: col_idx - 1], '\w*$')
-    var before  = text[: col_idx - len(prefix) - 1]
-    var chain   = substitute(matchstr(before, '[a-zA-Z0-9_.]\+\.$'), '\.$', '', '')
-    return [prefix, chain]
-enddef
-
-def LocalCtx(): list<any>
-    var cur        = line('.')
-    var start_line = cur
-    if getline(cur) !~# '^\S.*::\s*proc\>'
-        while start_line > 1
-            if getline(start_line - 1) =~# '^\S.*::\s*proc\>'
-                start_line -= 1
-                break
-            endif
-            start_line -= 1
-        endwhile
-    endif
-    var depth    = 0
-    var end_line = start_line
-    var last     = line('$')
-    while end_line <= last
-        var ch = 0
-        for c in split(getline(end_line), '\zs')
-            if c ==# '{' | depth += 1 | elseif c ==# '}' | depth -= 1 | endif
-        endfor
-        if depth <= 0 && end_line > start_line
+    while column_index > 0 && line_text[column_index - 1] ==# '.'
+        var next_dot_index = column_index - 1
+        var segment_start  = SkipBackwardOverChainSegment(line_text, next_dot_index)
+        if segment_start == next_dot_index
             break
         endif
-        end_line += 1
+        column_index = segment_start
     endwhile
-    return [start_line, getline(start_line, end_line)->join("\n")]
+    return line_text[column_index : last_dot_index - 1]
 enddef
 
-export def IndexAsync(filepath: string)
-    SendAsync(filepath, ['index', filepath])
+def CompletionContext(): list<string>
+    var column_index   = col('.') - 1
+    var line_text      = getline('.')
+    var typed_prefix   = matchstr(line_text[: column_index - 1], '\w*$')
+    var text_before    = line_text[: column_index - len(typed_prefix) - 1]
+    var dot_chain      = ExtractDotChainBeforeIndex(line_text, len(text_before))
+    return [typed_prefix, dot_chain]
 enddef
 
-export def IndexBufAsync(filepath: string)
-    SendAsync(filepath, ['index_buf', filepath, getline(1, '$')->join("\n")])
+def StartOfCurrentWordColumn(): number
+    var column_index = col('.') - 1
+    var line_text    = getline('.')
+    while column_index > 0 && line_text[column_index - 1] =~# '\w'
+        column_index -= 1
+    endwhile
+    return column_index
+enddef
+
+def DotChainBeforeCursorWord(): string
+    return ExtractDotChainBeforeIndex(getline('.'), StartOfCurrentWordColumn())
+enddef
+
+def RebuildTopLevelProcRangesIfStale()
+    var buffer_number = bufnr('%')
+    var cached = get(g_top_level_proc_ranges_by_buffer, buffer_number, {})
+    if get(cached, 'changedtick', -1) == b:changedtick
+        return
+    endif
+
+    var ranges: list<list<number>> = []
+    var brace_depth              = 0
+    var pending_start_line       = 0
+    var last_line                = line('$')
+    var scan_line                = 1
+    while scan_line <= last_line
+        var line_text = getline(scan_line)
+        if brace_depth == 0 && pending_start_line == 0 && line_text =~# '::\s*proc\>'
+            pending_start_line = scan_line
+        endif
+        for character in split(line_text, '\zs')
+            if character ==# '{'
+                brace_depth += 1
+            elseif character ==# '}'
+                brace_depth -= 1
+                if brace_depth == 0 && pending_start_line != 0
+                    ranges->add([pending_start_line, scan_line])
+                    pending_start_line = 0
+                endif
+            endif
+        endfor
+        scan_line += 1
+    endwhile
+
+    g_top_level_proc_ranges_by_buffer[buffer_number] = {changedtick: b:changedtick, ranges: ranges}
+enddef
+
+def FindEnclosingProcedureStartAndSource(): list<any>
+    RebuildTopLevelProcRangesIfStale()
+    var current_line = line('.')
+    var ranges       = g_top_level_proc_ranges_by_buffer[bufnr('%')].ranges
+
+    var proc_start = current_line
+    var proc_end   = current_line
+    for range_pair in ranges
+        if current_line >= range_pair[0] && current_line <= range_pair[1]
+            proc_start = range_pair[0]
+            proc_end   = range_pair[1]
+            break
+        endif
+        if current_line < range_pair[0]
+            break
+        endif
+    endfor
+
+    if current_line > proc_end
+        return [proc_start, '', 0]
+    endif
+    return [proc_start, getline(proc_start, proc_end)->join("\n"), current_line - proc_start]
+enddef
+
+export def IndexFileOnDisk(file_path: string)
+    SendRequest(file_path, ['index', file_path], false)
+enddef
+
+export def IndexUnsavedBuffer(file_path: string)
+    SendRequest(file_path, ['index_unsaved', file_path, getline(1, '$')->join("\n")], false)
 enddef
 
 export def Completion(findstart: number, base: string): any
     if findstart
-        var col_idx = col('.') - 1
-        var text    = getline('.')
-        while col_idx > 0 && text[col_idx - 1] =~# '\w'
-            col_idx -= 1
-        endwhile
-        return col_idx
+        return StartOfCurrentWordColumn()
     endif
-    var [_prefix, chain] = CompContext()
-    var [_start,  ctx]   = LocalCtx()
+    var [_prefix, dot_chain] = CompletionContext()
+    var [_proc_start, enclosing_procedure_source, cursor_line_offset] = FindEnclosingProcedureStartAndSource()
     var frames = &modified
-        ? ['comp_buf', expand('%:p'), base, chain, getline(1, '$')->join("\n"), ctx]
-        : ['comp',     expand('%:p'), base, chain, ctx]
-    var raw = Request(expand('%:p'), frames)
-    if raw ==# ''
+        ? ['complete_unsaved', expand('%:p'), base, dot_chain, enclosing_procedure_source, string(cursor_line_offset), getline(1, '$')->join("\n")]
+        : ['complete',         expand('%:p'), base, dot_chain, enclosing_procedure_source, string(cursor_line_offset)]
+    var raw_response = SendRequest(expand('%:p'), frames)
+    if raw_response ==# ''
         return []
     endif
     var candidates: list<dict<string>> = []
-    for entry in raw->split("\n")
+    for entry in raw_response->split("\n")
         if entry ==# ''
             continue
         endif
@@ -279,23 +331,24 @@ export def ToggleHover()
             return
         endif
     endif
-    var word = expand('<cword>')
-    if word->empty()
+    var symbol = expand('<cword>')
+    if symbol->empty()
         return
     endif
     if (substitute(strpart(getline('.'), 0, col('.') - 1), '[^"]', '', 'g')->len() % 2) == 1
         return
     endif
-    var [_start, ctx] = LocalCtx()
-    var response = Request(expand('%:p'), ['hover', word, ctx])
+    var dot_chain = DotChainBeforeCursorWord()
+    var [_start, enclosing_procedure_source, cursor_line_offset] = FindEnclosingProcedureStartAndSource()
+    var response = SendRequest(expand('%:p'), ['hover', symbol, dot_chain, enclosing_procedure_source, string(cursor_line_offset)])
     if response =~# '^\s*$'
         return
     endif
-    var lines = trim(response)->split('\n')
-    if lines->empty()
+    var hover_lines = trim(response)->split('\n')
+    if hover_lines->empty()
         return
     endif
-    hover_popup_id = popup_atcursor(lines, {
+    hover_popup_id = popup_atcursor(hover_lines, {
         border:      [1, 1, 1, 1],
         borderchars: ['─', '│', '─', '│', '┌', '┐', '┘', '└'],
         close:       'click',
@@ -304,24 +357,25 @@ export def ToggleHover()
 enddef
 
 export def GotoDefinition()
-    var word = expand('<cword>')
-    if word->empty()
+    var symbol = expand('<cword>')
+    if symbol->empty()
         return
     endif
-    var fp = expand('%:p')
-    Request(fp, ['index_buf', fp, getline(1, '$')->join("\n")])
-    var [_start, ctx] = LocalCtx()
-    var resp = Request(fp, ['goto', word, ctx, fp])
-    if resp ==# ''
+    var current_file_path = expand('%:p')
+    SendRequest(current_file_path, ['index_unsaved', current_file_path, getline(1, '$')->join("\n")])
+    var dot_chain = DotChainBeforeCursorWord()
+    var [proc_start, enclosing_procedure_source, cursor_line_offset] = FindEnclosingProcedureStartAndSource()
+    var goto_response = SendRequest(current_file_path, ['goto', symbol, dot_chain, enclosing_procedure_source, current_file_path, string(cursor_line_offset), string(proc_start)])
+    if goto_response ==# ''
         silent! normal! gd
         return
     endif
-    var parts = resp->split("\x00")
+    var parts = goto_response->split("\x00")
     if len(parts) < 3
         return
     endif
     normal! m'
-    if resolve(parts[0]) !=# resolve(fp)
+    if resolve(parts[0]) !=# resolve(current_file_path)
         execute 'hide edit' fnameescape(parts[0])
     endif
     cursor(str2nr(parts[1]), str2nr(parts[2]))
@@ -330,8 +384,7 @@ enddef
 export def SetupOdinBuffer()
     EnsureDaemon(expand('<afile>:p'))
     setlocal omnifunc=heimdall#Completion
-    IndexAsync(expand('<afile>:p'))
+    IndexFileOnDisk(expand('<afile>:p'))
     nnoremap <buffer> <silent> K  <cmd>call heimdall#ToggleHover()<CR>
     nnoremap <buffer> <silent> gd <cmd>call heimdall#GotoDefinition()<CR>
 enddef
-

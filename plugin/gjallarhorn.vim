@@ -15,6 +15,6 @@ g:gjallarhorn_root_markers    = get(g:, 'gjallarhorn_root_markers', ['.git', '.e
 augroup Gjallarhorn
     autocmd!
     autocmd BufReadPost,BufNewFile,BufWritePost *.odin heimdall#SetupOdinBuffer()
-    autocmd BufWritePost                        *.odin heimdall#IndexAsync(expand('<afile>:p'))
-    autocmd CursorHold,CursorHoldI              *.odin heimdall#IndexBufAsync(expand('%:p'))
+    autocmd BufWritePost                        *.odin heimdall#IndexFileOnDisk(expand('<afile>:p'))
+    autocmd CursorHold,CursorHoldI              *.odin heimdall#IndexUnsavedBuffer(expand('%:p'))
 augroup END
